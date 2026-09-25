@@ -1,30 +1,69 @@
-# Phira
+# PhiraiAd
 
-![Phira Showcase](https://phira.5wyxi.com/files/github-showcase.png)
+PhiraiAd 是基于 [Phira](https://github.com/TeamFlos/phira) 修改的非官方版本。
 
-[中文版本](./README-zh_CN.md)
+## 主要功能
 
-## Download
+PhiraiAd 在原版 Phira 的基础上增加或修改了多项练习、判定和分析功能，包括：
 
-- [GitHub Release](https://github.com/TeamFlos/phira/releases): For Android, Windows and Linux
-- [616.sb mirror](https://616.sb/#phira): Android only
-- [App Store](https://apps.apple.com/us/app/phira/id6447435864): For iOS
-- ~~[.ipa Release](https://github.com/F-Unction/phira_ipa/releases): For iOS~~
+- Phigros 原版判定模式
+- 判定范围可视化
+- 练习模式扩展
+- 流速调整
+- 自动倒打
+- 按键转换
+- AI 定数预测
+- 自定义 RKS 计算
+- Hold 显示与打击特效改进
+- 其他界面、功能和兼容性修改
 
-## Contribution
+## 下载
 
-Issues & pull requests are welcome! Also check these good first [issues](https://github.com/TeamFlos/phira/issues?q=label%3A%22good+first+issue%22) and [pull requests](https://github.com/TeamFlos/phira/issues?q=label%3A%22good+first+issue%22).
+前往本仓库的 **Releases** 页面下载。
 
-If you want to talk with us in depth, email [contact@phira.cn](mailto://contact@phira.cn). Currently we are looking for **Rust** Programmers *with rhythm/music game experience*.
+## 在线成绩说明
 
-## Translation
+Phira 官方没有允许改版上传在线成绩。
 
-See our [Weblate](https://hosted.weblate.org/engage/phira/) page for the latest translation progress. You can easily contribute to translations there.
+AI 定数和自定义 RKS 只用于本地显示和分析。
 
-![Translation Progress](https://hosted.weblate.org/widget/phira/svg-badge.svg)
+## AI 定数预测
 
-![Translation Status](https://hosted.weblate.org/widget/phira/multi-auto.svg)
+PhiraiAd 包含本地 AI 谱面难度预测功能，仅供参考。
 
-## Star History
+由于手机性能限制、本人水平不足且小部分谱面预测偏差很大，不确保预测准确性。
 
-[![Stargazers over time](https://starchart.cc/TeamFlos/phira.svg?variant=adaptive)](https://starchart.cc/TeamFlos/phira)
+10.0以下、17.5以上的谱面预测偏差值较大。
+
+10.0~17.5的谱面平均预测偏差绝对值约为0.52，若全部参与RKS计算，则对最终RKS的平均预测偏差绝对值约为0.14。
+
+## 上游项目
+
+本项目基于：
+
+- Phira
+  https://github.com/TeamFlos/phira
+
+感谢 Phira 及其相关开源项目的开发者。
+
+## 许可证
+
+PhiraiAd 基于 GPL-3.0-only 授权的 Phira 修改，因此本项目同样按照 GNU GPL v3 发布。
+
+完整许可证请查看：
+
+```
+LICENSE
+```
+
+在分发修改版本或二进制文件时，请遵守 GPLv3 的相关要求。
+
+## 免责声明
+
+PhiraiAd 是非官方修改版本。
+
+本项目不代表 TeamFlos，不是 Phira 官方版本。
+
+Phira、Phigros 以及相关名称、音乐、曲绘、谱面和其他资源的版权归各自权利人所有。
+
+本仓库的开源许可仅适用于有权按照相应许可证分发的代码和资源。
