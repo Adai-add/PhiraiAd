@@ -17,9 +17,15 @@ PhiraiAd 在原版 Phira 的基础上增加或修改了多项练习、判定和�
 - Hold 显示与打击特效改进
 - 其他界面、功能和兼容性修改
 
+## 适配版本、语言
+
+当前v1.0.0版本仅适配安卓、中文。
+
 ## 下载
 
-前往本仓库的 **Releases** 页面下载。
+请前往 [Releases](https://github.com/Adai-add/PhiraiAd/releases) 下载最新版本 APK。
+
+[下载最新版](https://github.com/Adai-add/PhiraiAd/releases/latest)
 
 ## 在线成绩说明
 
