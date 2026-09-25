@@ -1,0 +1,2 @@
+time = Czas
+name = Nazwa

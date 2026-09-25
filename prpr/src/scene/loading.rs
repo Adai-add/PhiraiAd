@@ -1,0 +1,329 @@
+use super::{draw_background, ending::RecordUpdateState, game::GameMode, GameScene, NextScene, Scene};
+use crate::{
+    config::Config,
+    core::{Resource, BOLD_FONT},
+    ext::{poll_future, semi_black, semi_white, LocalTask, RectExt, SafeTexture, BLACK_TEXTURE},
+    fs::FileSystem,
+    info::ChartInfo,
+    judge::Judge,
+    play_report::PlayReport,
+    scene::game::SimpleRecord,
+    task::Task,
+    time::TimeManager,
+    ui::{clip_rounded_rect, rounded_rect_shadow, LoadingParams, ShadowConfig, Ui, PREFER_REDUCED_MOTION},
+};
+use ::rand::{seq::SliceRandom, thread_rng};
+use anyhow::{Context, Result};
+use macroquad::prelude::*;
+use regex::Regex;
+use std::sync::{atomic::Ordering, Arc};
+use tracing::warn;
+
+const BEFORE_TIME: f32 = 1.;
+const FADE_IN_TIME: f32 = 0.6;
+
+pub type UploadFn = Arc<dyn Fn(Vec<u8>) -> Task<Result<RecordUpdateState>>>;
+pub type UpdateFn = Box<dyn FnMut(f64, &mut Resource, &mut Judge)>;
+pub type SaveFn = Box<dyn Fn(SimpleRecord) -> Result<()>>;
+pub type ReportFn = Arc<dyn Fn(&PlayReport) -> Result<String>>;
+
+fn transition_time() -> Option<f32> {
+    if PREFER_REDUCED_MOTION.load(Ordering::Relaxed) {
+        None
+    } else {
+        Some(1.4)
+    }
+}
+
+fn wait_time() -> f32 {
+    if PREFER_REDUCED_MOTION.load(Ordering::Relaxed) {
+        0.
+    } else {
+        0.4
+    }
+}
+
+pub struct BasicPlayer {
+    pub avatar: Option<SafeTexture>,
+    pub id: i32,
+    pub rks: f32,
+    pub historic_best: u32,
+}
+
+pub struct LoadingScene {
+    info: ChartInfo,
+    background: SafeTexture,
+    illustration: SafeTexture,
+    pub load_task: LocalTask<Result<GameScene>>,
+    next_scene: Option<NextScene>,
+    finish_time: f32,
+    target: Option<RenderTarget>,
+    charter: String,
+
+    theme_color: Color,
+    use_black: bool,
+}
+
+impl LoadingScene {
+    pub async fn load(fs: &mut dyn FileSystem, path: &str) -> Result<(SafeTexture, SafeTexture, Color)> {
+        let image = image::load_from_memory(&fs.load_file(path).await?).context("Failed to decode image")?;
+        let (w, h) = (image.width(), image.height());
+        let size = w as usize * h as usize;
+
+        let mut blurred_rgb = image.to_rgb8();
+        let color = color_thief::get_palette(&blurred_rgb, color_thief::ColorFormat::Rgb, 10, 2)?[0];
+        let mut vec = unsafe { Vec::from_raw_parts(std::mem::transmute::<*mut u8, *mut [u8; 3]>(blurred_rgb.as_mut_ptr()), size, size) };
+        fastblur::gaussian_blur(&mut vec, w as _, h as _, 50.);
+        std::mem::forget(vec);
+        let mut blurred = Vec::with_capacity(size * 4);
+        for input in blurred_rgb.chunks_exact(3) {
+            blurred.extend_from_slice(input);
+            blurred.push(255);
+        }
+        Ok((
+            Texture2D::from_rgba8(w as _, h as _, &image.into_rgba8()).into(),
+            Texture2D::from_image(&Image {
+                width: w as _,
+                height: h as _,
+                bytes: blurred,
+            })
+            .into(),
+            Color::from_rgba(color.r, color.g, color.b, 255),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new(
+        mode: GameMode,
+        mut info: ChartInfo,
+        config: Config,
+        mut fs: Box<dyn FileSystem>,
+        player: Option<BasicPlayer>,
+        upload_fn: Option<UploadFn>,
+        update_fn: Option<UpdateFn>,
+        save_fn: Option<SaveFn>,
+        report_fn: Option<ReportFn>,
+
+        preloaded: Option<(SafeTexture, SafeTexture, Color)>,
+    ) -> Result<Self> {
+        let (background, theme_color) = match preloaded {
+            Some((ill, bg, color)) => (Some((ill, bg)), color),
+            None => match Self::load(fs.as_mut(), &info.illustration).await {
+                Ok((ill, bg, color)) => (Some((ill, bg)), color),
+                Err(err) => {
+                    warn!("failed to load background: {err:?}");
+                    (None, WHITE)
+                }
+            },
+        };
+        let use_black = (theme_color.r * 0.299 + theme_color.g * 0.587 + theme_color.b * 0.114) > 186. / 255.;
+        let (illustration, background) = background.unwrap_or_else(|| (BLACK_TEXTURE.clone(), BLACK_TEXTURE.clone()));
+        if info.tip.is_none() {
+            info.tip = Some(crate::config::TIPS.choose(&mut thread_rng()).unwrap().to_owned());
+        }
+        let future = Box::pin(GameScene::new(
+            mode,
+            info.clone(),
+            config,
+            fs,
+            player,
+            background.clone(),
+            illustration.clone(),
+            upload_fn,
+            update_fn,
+            save_fn,
+            report_fn,
+        ));
+        let charter = Regex::new(r"\[!:[0-9]+:([^:]*)\]").unwrap().replace_all(&info.charter, "$1").to_string();
+
+        Ok(Self {
+            info,
+            background,
+            illustration,
+            load_task: Some(future),
+            next_scene: None,
+            finish_time: f32::INFINITY,
+            target: None,
+            charter,
+
+            theme_color,
+            use_black,
+        })
+    }
+}
+
+impl Scene for LoadingScene {
+    fn enter(&mut self, tm: &mut TimeManager, target: Option<RenderTarget>) -> Result<()> {
+        self.target = target;
+        tm.reset();
+        Ok(())
+    }
+
+    fn pause(&mut self, tm: &mut TimeManager) -> Result<()> {
+        tm.pause();
+        Ok(())
+    }
+
+    fn resume(&mut self, tm: &mut TimeManager) -> Result<()> {
+        tm.resume();
+        Ok(())
+    }
+
+    fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
+        if let Some(future) = self.load_task.as_mut() {
+            loop {
+                match poll_future(future.as_mut()) {
+                    None => {
+                        if self.target.is_none() {
+                            break;
+                        }
+                        std::thread::yield_now();
+                    }
+                    Some(game_scene) => {
+                        self.load_task = None;
+                        self.next_scene =
+                            Some(game_scene.map_or_else(|e| NextScene::PopWithResult(Box::new(e)), |it| NextScene::Replace(Box::new(it))));
+                        self.finish_time = tm.now() as f32 + BEFORE_TIME;
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn render(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
+        let mut cam = ui.camera();
+        let asp = -cam.zoom.y;
+        let top = 1. / asp;
+        let t = tm.now() as f32;
+        cam.render_target = self.target;
+        set_camera(&cam);
+        draw_background(*self.background);
+
+        ui.alpha((t / FADE_IN_TIME).min(1.), |ui| {
+            let dx = if t > self.finish_time {
+                transition_time().map_or(1., |tt| {
+                    let p = ((t - self.finish_time) / tt).min(1.);
+                    p.powi(3) * 2.
+                })
+            } else {
+                0.
+            };
+
+            ui.dx(-dx);
+
+            let r = Rect::default().nonuniform_feather(0.65, top * 0.7);
+            let config = ShadowConfig {
+                radius: 0.008,
+                ..Default::default()
+            };
+            let bar_height = 0.16;
+            let ir = Rect { h: r.h - bar_height, ..r };
+
+            let (main, sub) = Ui::main_sub_colors(self.use_black, 1.);
+
+            rounded_rect_shadow(ui, r, &config);
+            clip_rounded_rect(ui, r, config.radius, |ui| {
+                ui.fill_rect(r, Color { a: 0.6, ..self.theme_color });
+                ui.fill_rect(ir, (*self.illustration, ir));
+                ui.fill_rect(ir, (semi_black(0.5), (ir.x, ir.bottom()), Color::default(), (ir.x, ir.y)));
+            });
+
+            let ct = ir.bottom() + bar_height / 2.;
+            let lf = r.x + 0.04;
+            let rt = r.x + r.w * 0.65;
+            let mw = rt - lf - 0.02;
+            ui.text(&self.info.name)
+                .pos(lf, ct)
+                .anchor(0., 1.)
+                .size(0.7)
+                .color(main)
+                .max_width(mw)
+                .draw();
+            ui.text(&self.info.composer)
+                .pos(lf, ct + 0.012)
+                .anchor(0., 0.)
+                .size(0.4)
+                .color(sub)
+                .max_width(mw)
+                .draw();
+
+            let lf = rt + 0.03;
+            let dy = bar_height / 6.;
+            let size = 0.45;
+            ui.text("Chart")
+                .pos(lf, ct - dy)
+                .anchor(0., 0.5)
+                .no_baseline()
+                .size(size)
+                .color(sub)
+                .draw_using(&BOLD_FONT);
+            ui.text("Cover")
+                .pos(lf, ct + dy)
+                .anchor(0., 0.5)
+                .no_baseline()
+                .size(size)
+                .color(sub)
+                .draw_using(&BOLD_FONT);
+
+            let lf = lf + 0.12;
+            let mw = r.right() - lf - 0.01;
+            ui.text(&self.charter)
+                .pos(lf, ct - dy)
+                .anchor(0., 0.5)
+                .no_baseline()
+                .size(size)
+                .color(main)
+                .max_width(mw)
+                .draw();
+            ui.text(&self.info.illustrator)
+                .pos(lf, ct + dy)
+                .anchor(0., 0.5)
+                .no_baseline()
+                .size(size)
+                .color(main)
+                .max_width(mw)
+                .draw();
+
+            let r = 0.07;
+            ui.loading(
+                1. - r,
+                top - r,
+                t,
+                if t > self.finish_time {
+                    let p = ((t - self.finish_time) / 0.4).min(1.);
+                    semi_white((1. - p).powi(3))
+                } else {
+                    WHITE
+                },
+                LoadingParams {
+                    radius: 0.04,
+                    width: 0.01,
+                    ..Default::default()
+                },
+            );
+
+            ui.text(self.info.tip.as_ref().unwrap())
+                .pos(-0.95, top - 0.05)
+                .anchor(0., 1.)
+                .size(0.47)
+                .color(WHITE)
+                .draw();
+        });
+
+        Ok(())
+    }
+
+    fn next_scene(&mut self, tm: &mut TimeManager) -> NextScene {
+        if matches!(self.next_scene, Some(NextScene::PopWithResult(_))) {
+            return self.next_scene.take().unwrap();
+        }
+        if tm.now() as f32 > self.finish_time + transition_time().unwrap_or_default() + wait_time() {
+            if let Some(scene) = self.next_scene.take() {
+                return scene;
+            }
+        }
+        NextScene::None
+    }
+}

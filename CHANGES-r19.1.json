@@ -1,0 +1,18 @@
+{
+  "baseline": "0.8.2-r19",
+  "version": "0.8.2-r19.1",
+  "modified": [
+    "ANDROID-RELEASE.md",
+    "CUSTOM-RKS.md",
+    "MOD-README.md",
+    "phira/src/charts_view.rs",
+    "phira/src/custom_rks.rs",
+    "phira/src/page/rks.rs",
+    "prpr/src/play_report.rs",
+    "scripts/package_android_release.py",
+    "tests/chart-play/tests/rks_ui.rs"
+  ],
+  "added": [],
+  "removed": [],
+  "instructions": "Apply over r19. See CUSTOM-RKS.md and ANDROID-RELEASE.md. Signing keys and toolchains are not included."
+}

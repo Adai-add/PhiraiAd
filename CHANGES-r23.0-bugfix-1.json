@@ -1,0 +1,37 @@
+{
+  "version": "r23.0-bugfix-1",
+  "baseline": "r23.0",
+  "changed": [
+    "ANDROID-RELEASE.md",
+    "REPLICA-SETTINGS.md",
+    "phira/locales/de-DE/song.ftl",
+    "phira/locales/en-US/song.ftl",
+    "phira/locales/fr-FR/song.ftl",
+    "phira/locales/id-ID/song.ftl",
+    "phira/locales/ja-JP/song.ftl",
+    "phira/locales/ko-KR/song.ftl",
+    "phira/locales/mn-MN/song.ftl",
+    "phira/locales/pl-PL/song.ftl",
+    "phira/locales/pt-BR/song.ftl",
+    "phira/locales/ru-RU/song.ftl",
+    "phira/locales/th-TH/song.ftl",
+    "phira/locales/tr-TR/song.ftl",
+    "phira/locales/vi-VN/song.ftl",
+    "phira/locales/zh-CN/song.ftl",
+    "phira/src/chart_play_settings.rs",
+    "phira/src/scene/song.rs",
+    "prpr/src/play_report.rs",
+    "prpr/src/scene/game.rs",
+    "prpr/src/ui/chart_play_editor.rs",
+    "prpr/src/ui.rs",
+    "scripts/package_android_release.py",
+    "tests/chart-play/build.rs",
+    "tests/chart-play/src/lib.rs",
+    "tests/chart-play/tests/chart_editor.rs"
+  ],
+  "added": [
+    "prpr/src/ui/note_conversion_mods.rs",
+    "tests/chart-play/tests/chart_editor_geometry.rs"
+  ],
+  "removed": []
+}

@@ -1,0 +1,52 @@
+// Compile the actual settings groups against recording UI adapters in settings_ui.rs.
+fn main() {
+    let path = "../../phira/src/page/settings.rs";
+    println!("cargo:rerun-if-changed={path}");
+    let source = std::fs::read_to_string(path).unwrap();
+    let helpers = &source[source.find("fn render_switch(").unwrap()..source.find("struct GeneralList").unwrap()];
+    let groups = &source[source.find("struct ChartList").unwrap()..];
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    std::fs::write(out.join("settings_groups.rs"), format!("{helpers}\n{groups}")).unwrap();
+    let path = "../../prpr/src/ui.rs";
+    println!("cargo:rerun-if-changed={path}");
+    let source = std::fs::read_to_string(path).unwrap();
+    let slider = &source[source.find("    pub fn practice_speed_slider(").unwrap()..source.find("    pub fn hgrids(").unwrap()];
+    let clicked = &source[source.find("    fn clicked(").unwrap()..source.find("    pub fn accent(").unwrap()];
+    let button = &source[source.find("    pub fn button(").unwrap()..source.find("    pub fn checkbox(").unwrap()];
+    std::fs::write(out.join("practice_slider.rs"), format!("impl Ui {{\n{slider}\n{clicked}\n{button}\n}}\n")).unwrap();
+    let path="../../prpr/src/ui/chart_play_editor.rs";
+    println!("cargo:rerun-if-changed={path}");
+    let code=std::fs::read_to_string(path).unwrap();
+    let code=code.replace("//!", "//").replace("use super::Ui;", "").replace("use macroquad::prelude::*;", "");
+    std::fs::write(out.join("chart_editor.rs"),code).unwrap();
+    let source=std::fs::read_to_string("../../prpr/src/ui.rs").unwrap();
+    let clicked=&source[source.find("    fn clicked(").unwrap()..source.find("    pub fn accent(").unwrap()];
+    let button=&source[source.find("    pub fn button(").unwrap()..source.find("    pub fn checkbox(").unwrap()];
+    let camera=&source[source.find("    pub fn camera(").unwrap()..source.find("    pub fn ensure_touches(").unwrap()];
+    std::fs::write(out.join("editor_input.rs"), format!("impl Ui {{ {camera} {clicked} {} }}",button.replace("pub fn button(","pub fn raw_button("))).unwrap();
+    let path="../../prpr/src/ui/note_conversion_mods.rs";
+    println!("cargo:rerun-if-changed={path}");
+    let source=std::fs::read_to_string(path).unwrap().replace("//!","//").replace("use super::{DRectButton, Ui};", "").replace("use macroquad::prelude::*;", "");
+    std::fs::write(out.join("note_mods.rs"),source).unwrap();
+    let path="../../prpr/src/core/chart.rs";
+    println!("cargo:rerun-if-changed={path}");
+    let code=std::fs::read_to_string(path).unwrap();
+    let code=&code[code.find("/// Preserve original note types").unwrap()..code.find("impl Chart {").unwrap()];
+    std::fs::write(out.join("conversion.rs"),code).unwrap();
+    let path="../../prpr/src/core/line.rs";
+    println!("cargo:rerun-if-changed={path}");
+    let code=std::fs::read_to_string(path).unwrap();
+    let code=&code[code.find("#[derive(Clone)]\npub struct JudgeLineCache").unwrap()..code.find("pub struct JudgeLine {").unwrap()];
+    std::fs::write(out.join("line_cache.rs"),code).unwrap();
+    // Exercise the production end-of-run record gate, not a copy of its policy.
+    let path = "../../prpr/src/scene/game.rs";
+    println!("cargo:rerun-if-changed={path}");
+    let source = std::fs::read_to_string(path).unwrap();
+    let record = &source[source.find("#[derive(Clone, Debug, Serialize, Deserialize)]").unwrap()..source.find("fn fmt_time(").unwrap()];
+    let mode = &source[source.find("#[derive(PartialEq, Eq)]").unwrap()..source.find("#[derive(Clone)]\nenum State").unwrap()];
+    let pause=&source[source.find("    /// All button/automatic pauses").unwrap()..source.find("    fn sync_auto_flip(").unwrap()];
+    std::fs::write(out.join("pause_resume.rs"),format!("impl GameScene {{ {pause} }}")).unwrap();
+    let begin = source.find("                    let result = self.judge.result();").unwrap();
+    let gate = &source[begin..source[begin..].find("                    self.next_scene = match self.mode").unwrap() + begin];
+    std::fs::write(out.join("record_gate.rs"), format!("{record}\n{mode}\nimpl Scene {{ fn record(&self) -> Option<SimpleRecord> {{ {gate}\nrecord }} }}")).unwrap();
+}

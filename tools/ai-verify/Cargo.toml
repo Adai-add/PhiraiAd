@@ -1,0 +1,14 @@
+[package]
+name = "phira-ai-verify"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+anyhow.workspace = true
+serde = {workspace = true, features=["derive"]}
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+pollster.workspace = true
+prpr.workspace = true
+uuid = { workspace = true, features=["serde"] }

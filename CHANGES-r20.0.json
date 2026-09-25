@@ -1,0 +1,36 @@
+{
+  "baseline": "0.8.2-r19.1",
+  "version": "0.8.2-r20.0",
+  "modified": [
+    "ANDROID-RELEASE.md",
+    "MOD-README.md",
+    "phira/locales/de-DE/settings.ftl",
+    "phira/locales/en-US/settings.ftl",
+    "phira/locales/fr-FR/settings.ftl",
+    "phira/locales/id-ID/settings.ftl",
+    "phira/locales/ja-JP/settings.ftl",
+    "phira/locales/ko-KR/settings.ftl",
+    "phira/locales/mn-MN/settings.ftl",
+    "phira/locales/pl-PL/settings.ftl",
+    "phira/locales/pt-BR/settings.ftl",
+    "phira/locales/ru-RU/settings.ftl",
+    "phira/locales/th-TH/settings.ftl",
+    "phira/locales/tr-TR/settings.ftl",
+    "phira/locales/vi-VN/settings.ftl",
+    "phira/locales/zh-CN/settings.ftl",
+    "phira/locales/zh-TW/settings.ftl",
+    "phira/src/page/settings.rs",
+    "prpr/src/config.rs",
+    "prpr/src/core/note.rs",
+    "prpr/src/core.rs",
+    "prpr/src/judge.rs",
+    "prpr/src/play_report.rs",
+    "scripts/package_android_release.py",
+    "tests/chart-play/src/lib.rs"
+  ],
+  "added": [
+    "HOLD-HEAD-EFFECT.md"
+  ],
+  "removed": [],
+  "instructions": "Apply over r19.1. See HOLD-HEAD-EFFECT.md and ANDROID-RELEASE.md. Signing keys and toolchains are not included."
+}

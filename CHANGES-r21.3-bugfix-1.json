@@ -1,0 +1,19 @@
+{
+  "baseline": "r21.3",
+  "version": "r21.3-bugfix-1",
+  "modified": [
+    "ANDROID-RELEASE.md",
+    "CHART-PLAY-ASSISTS.md",
+    "REPLICA-SETTINGS.md",
+    "prpr/src/config.rs",
+    "prpr/src/play_report.rs",
+    "prpr/src/scene/game.rs",
+    "scripts/package_android_release.py",
+    "tests/chart-play/build.rs",
+    "tests/chart-play/src/lib.rs"
+  ],
+  "added": [
+    "tests/chart-play/tests/record_gate.rs"
+  ],
+  "removed": []
+}

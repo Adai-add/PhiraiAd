@@ -1,0 +1,97 @@
+{
+  "sample_id": "56a9de7c2e0543f9ff573fc0a1ade0d50ada9406aecd846543dd07e62b7c0c17",
+  "models": [
+    {
+      "model": "seed42_fold1",
+      "seed": 42,
+      "fold": 1,
+      "prediction": 15.470890045166016
+    },
+    {
+      "model": "seed42_fold2",
+      "seed": 42,
+      "fold": 2,
+      "prediction": 14.697233200073242
+    },
+    {
+      "model": "seed42_fold3",
+      "seed": 42,
+      "fold": 3,
+      "prediction": 14.894567489624023
+    },
+    {
+      "model": "seed42_fold4",
+      "seed": 42,
+      "fold": 4,
+      "prediction": 16.262929916381836
+    },
+    {
+      "model": "seed42_fold5",
+      "seed": 42,
+      "fold": 5,
+      "prediction": 15.383703231811523
+    },
+    {
+      "model": "seed43_fold1",
+      "seed": 43,
+      "fold": 1,
+      "prediction": 15.041366577148438
+    },
+    {
+      "model": "seed43_fold2",
+      "seed": 43,
+      "fold": 2,
+      "prediction": 14.384034156799316
+    },
+    {
+      "model": "seed43_fold3",
+      "seed": 43,
+      "fold": 3,
+      "prediction": 16.802677154541016
+    },
+    {
+      "model": "seed43_fold4",
+      "seed": 43,
+      "fold": 4,
+      "prediction": 15.977377891540527
+    },
+    {
+      "model": "seed43_fold5",
+      "seed": 43,
+      "fold": 5,
+      "prediction": 15.71369743347168
+    },
+    {
+      "model": "seed44_fold1",
+      "seed": 44,
+      "fold": 1,
+      "prediction": 14.992528915405273
+    },
+    {
+      "model": "seed44_fold2",
+      "seed": 44,
+      "fold": 2,
+      "prediction": 15.807574272155762
+    },
+    {
+      "model": "seed44_fold3",
+      "seed": 44,
+      "fold": 3,
+      "prediction": 16.482162475585938
+    },
+    {
+      "model": "seed44_fold4",
+      "seed": 44,
+      "fold": 4,
+      "prediction": 17.231815338134766
+    },
+    {
+      "model": "seed44_fold5",
+      "seed": 44,
+      "fold": 5,
+      "prediction": 14.731411933898926
+    }
+  ],
+  "all15_mean": 15.591598002115886,
+  "absolute_tolerance": 0.0001
+}

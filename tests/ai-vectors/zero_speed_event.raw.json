@@ -1,0 +1,877 @@
+{
+  "formatVersion": 3,
+  "offset": -0.125,
+  "judgeLineList": [
+    {
+      "bpm": 120,
+      "notesAbove": [
+        {
+          "type": 3,
+          "time": 0,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 3,
+          "time": 8,
+          "positionX": -3,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 16,
+          "positionX": -1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 32,
+          "positionX": 3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 40,
+          "positionX": 5,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 56,
+          "positionX": -2,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 56,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 1,
+          "time": 64,
+          "positionX": 0,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 80,
+          "positionX": 4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 88,
+          "positionX": -5,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 104,
+          "positionX": -1,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 112,
+          "positionX": 1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 112,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 1,
+          "time": 128,
+          "positionX": 5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 136,
+          "positionX": -4,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 152,
+          "positionX": 0,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 160,
+          "positionX": 2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 168,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 1,
+          "time": 176,
+          "positionX": -5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 184,
+          "positionX": -3,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 200,
+          "positionX": 1,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 208,
+          "positionX": 3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 224,
+          "positionX": -4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 224,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 3,
+          "time": 232,
+          "positionX": -2,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 248,
+          "positionX": 2,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 256,
+          "positionX": 4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 272,
+          "positionX": -3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 280,
+          "positionX": -1,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 280,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 3,
+          "time": 296,
+          "positionX": 3,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 304,
+          "positionX": 5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 320,
+          "positionX": -2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 328,
+          "positionX": 0,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 336,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 3,
+          "time": 344,
+          "positionX": 4,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 352,
+          "positionX": -5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 368,
+          "positionX": -1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 376,
+          "positionX": 1,
+          "holdTime": 28,
+          "speed": 1.2
+        }
+      ],
+      "notesBelow": [
+        {
+          "type": 1,
+          "time": 0,
+          "positionX": -5,
+          "holdTime": 0,
+          "speed": -1
+        },
+        {
+          "type": 3,
+          "time": 24,
+          "positionX": 1,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 48,
+          "positionX": -4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 72,
+          "positionX": 2,
+          "holdTime": 28,
+          "speed": -1
+        },
+        {
+          "type": 1,
+          "time": 96,
+          "positionX": -3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 120,
+          "positionX": 3,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 144,
+          "positionX": -2,
+          "holdTime": 0,
+          "speed": -1
+        },
+        {
+          "type": 3,
+          "time": 168,
+          "positionX": 4,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 192,
+          "positionX": -1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 216,
+          "positionX": 5,
+          "holdTime": 28,
+          "speed": -1
+        },
+        {
+          "type": 1,
+          "time": 240,
+          "positionX": 0,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 264,
+          "positionX": -5,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 288,
+          "positionX": 1,
+          "holdTime": 0,
+          "speed": -1
+        },
+        {
+          "type": 3,
+          "time": 312,
+          "positionX": -4,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 336,
+          "positionX": 2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 360,
+          "positionX": -3,
+          "holdTime": 28,
+          "speed": -1
+        },
+        {
+          "type": 1,
+          "time": 384,
+          "positionX": 3,
+          "holdTime": 0,
+          "speed": 1.2
+        }
+      ],
+      "judgeLineMoveEvents": [
+        {
+          "startTime": -100,
+          "endTime": 452,
+          "start": 0.2,
+          "end": 0.8,
+          "start2": 0.7,
+          "end2": 0.3
+        }
+      ],
+      "judgeLineRotateEvents": [
+        {
+          "startTime": -100,
+          "endTime": 452,
+          "start": 0,
+          "end": 225
+        }
+      ],
+      "speedEvents": [
+        {
+          "startTime": -100,
+          "endTime": 64,
+          "value": -1
+        },
+        {
+          "startTime": 64,
+          "endTime": 64,
+          "value": 99
+        },
+        {
+          "startTime": 64,
+          "endTime": 96,
+          "value": 0
+        },
+        {
+          "startTime": 96,
+          "endTime": 452,
+          "value": 1.5
+        }
+      ]
+    },
+    {
+      "bpm": 120,
+      "notesAbove": [
+        {
+          "type": 2,
+          "time": 4,
+          "positionX": -4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 20,
+          "positionX": 0,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 28,
+          "positionX": 2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 28,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 4,
+          "time": 44,
+          "positionX": -5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 52,
+          "positionX": -3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 68,
+          "positionX": 1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 76,
+          "positionX": 3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 84,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 4,
+          "time": 92,
+          "positionX": -4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 100,
+          "positionX": -2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 116,
+          "positionX": 2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 124,
+          "positionX": 4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 140,
+          "positionX": -3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 140,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 2,
+          "time": 148,
+          "positionX": -1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 164,
+          "positionX": 3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 172,
+          "positionX": 5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 188,
+          "positionX": -2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 196,
+          "positionX": 0,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 196,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 2,
+          "time": 212,
+          "positionX": 4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 220,
+          "positionX": -5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 236,
+          "positionX": -1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 244,
+          "positionX": 1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 252,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 2,
+          "time": 260,
+          "positionX": 5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 268,
+          "positionX": -4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 284,
+          "positionX": 0,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 292,
+          "positionX": 2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 308,
+          "positionX": -5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 308,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 4,
+          "time": 316,
+          "positionX": -3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 332,
+          "positionX": 1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 340,
+          "positionX": 3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 356,
+          "positionX": -4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 364,
+          "positionX": -2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 364,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 4,
+          "time": 380,
+          "positionX": 2,
+          "holdTime": 0,
+          "speed": 1.2
+        }
+      ],
+      "notesBelow": [
+        {
+          "type": 4,
+          "time": 12,
+          "positionX": -2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 36,
+          "positionX": 4,
+          "holdTime": 0,
+          "speed": -1
+        },
+        {
+          "type": 4,
+          "time": 60,
+          "positionX": -1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 84,
+          "positionX": 5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 108,
+          "positionX": 0,
+          "holdTime": 0,
+          "speed": -1
+        },
+        {
+          "type": 2,
+          "time": 132,
+          "positionX": -5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 156,
+          "positionX": 1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 180,
+          "positionX": -4,
+          "holdTime": 0,
+          "speed": -1
+        },
+        {
+          "type": 4,
+          "time": 204,
+          "positionX": 2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 228,
+          "positionX": -3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 252,
+          "positionX": 3,
+          "holdTime": 0,
+          "speed": -1
+        },
+        {
+          "type": 2,
+          "time": 276,
+          "positionX": -2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 300,
+          "positionX": 4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 324,
+          "positionX": -1,
+          "holdTime": 0,
+          "speed": -1
+        },
+        {
+          "type": 4,
+          "time": 348,
+          "positionX": 5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 372,
+          "positionX": 0,
+          "holdTime": 0,
+          "speed": 1.2
+        }
+      ],
+      "judgeLineMoveEvents": [
+        {
+          "startTime": -100,
+          "endTime": 452,
+          "start": 0.2,
+          "end": 0.8,
+          "start2": 0.7,
+          "end2": 0.3
+        }
+      ],
+      "judgeLineRotateEvents": [
+        {
+          "startTime": -100,
+          "endTime": 452,
+          "start": 90,
+          "end": 315
+        }
+      ],
+      "speedEvents": [
+        {
+          "startTime": -100,
+          "endTime": 64,
+          "value": -1
+        },
+        {
+          "startTime": 64,
+          "endTime": 64,
+          "value": 99
+        },
+        {
+          "startTime": 64,
+          "endTime": 96,
+          "value": 0
+        },
+        {
+          "startTime": 96,
+          "endTime": 452,
+          "value": 1.5
+        }
+      ]
+    }
+  ]
+}

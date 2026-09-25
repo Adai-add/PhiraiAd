@@ -1,0 +1,26 @@
+login = Нэвтрэх
+login-sub = Идэвхтэй онлайн тоглоомчдын бүлэгт оролцохын тулд нэвтэрнэ үү
+back-login = Нэвтрэх хэсэг рүү буцах
+register = Бүртгүүлэх
+email = Имэйл хаяг
+username = Хэрэглэгчийн нэр
+password = Нууц үг
+name-length-req = Хэрэглэгчийн нэрийн урт { $min }-{ $max } тэмдэгт байх ёстой
+name-has-illegal-char = Хэрэглэгчийн нэрэнд дэмжигдээгүй үсэг байна
+pwd-length-req = Нууц үгийн урт { $min }-{ $max } тэмдэгт байх ёстой
+illegal-email = Имэйл хаяг буруу байна
+action-success =
+    { $action ->
+        [login] Амжилттай нэвтэрсэн
+        [register] Амжилттай бүртгүүлсэн
+       *[other] _
+    }
+action-failed =
+    { $action ->
+        [login] Нэвтрэхэд амжилтгүй боллоо
+        [register] Бүртгүүлэхэд амжилтгүй боллоо
+       *[other] _
+    }
+email-sent = Баталгаажуулах имэйл илгээгдсэн. Та баталгаажуулаад нэвтэрнэ үү.
+forget-password = Нууц үг мартсан уу?
+hykb-login-cancelled = 3839 Games рүү нэвтрэх үйл цуцлагдлаа

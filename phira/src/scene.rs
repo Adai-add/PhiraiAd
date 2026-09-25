@@ -1,0 +1,469 @@
+prpr_l10n::tl_file!("import" itl);
+
+mod chart_order;
+pub use chart_order::ChartOrder;
+
+mod chapter;
+pub use chapter::ChapterScene;
+
+pub(crate) mod event;
+pub use event::EventScene;
+
+mod main;
+pub use main::{MainScene, BGM_VOLUME_UPDATED, MP_PANEL};
+
+mod song;
+pub use song::{compress_folder, Downloading, SongScene, RECORD_ID};
+#[cfg(feature = "video")]
+mod unlock;
+#[cfg(feature = "video")]
+pub use unlock::UnlockScene;
+
+mod profile;
+pub use profile::ProfileScene;
+
+use crate::{
+    client::{Client, UserManager},
+    data::LocalChart,
+    dir, get_data, get_data_mut,
+    page::Fader,
+    save_data,
+};
+use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
+use once_cell::sync::{Lazy, OnceCell};
+use prpr::{
+    config::Mods,
+    core::{BOLD_FONT, PGR_FONT},
+    ext::{open_url, semi_white, unzip_into, RectExt, SafeTexture},
+    fs::{self, FileSystem},
+    info::{ChartFormat, ChartInfo},
+    parse::ParseWarnings,
+    scene::{show_error, show_message, FullLoadingView, GameScene},
+    task::Task,
+    ui::{Dialog, RectButton, Scroll, Scroller, Ui},
+};
+use std::{
+    any::Any,
+    cell::RefCell,
+    fs::File,
+    io::{BufReader, Write},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+};
+use tracing::{error, info, warn};
+use uuid::Uuid;
+
+thread_local! {
+    pub static TEX_BACKGROUND: RefCell<Option<SafeTexture>> = const { RefCell::new(None) };
+    pub static TEX_ICON_BACK: RefCell<Option<SafeTexture>> = const { RefCell::new(None) };
+}
+
+pub static ASSET_CHART_INFO: Lazy<Mutex<Option<ChartInfo>>> = Lazy::new(Mutex::default);
+/// External (in-browser) documents shown in the consent dialog.
+pub const TERMS_URL: &str = "https://phira.moe/terms-of-use";
+pub const PRIVACY_URL: &str = "https://phira.moe/privacy-policy";
+pub static TERMS: OnceCell<Option<String>> = OnceCell::new();
+type LoadTosTask = Task<Result<Option<String>>>;
+pub static LOAD_TOS_TASK: Lazy<Mutex<Option<LoadTosTask>>> = Lazy::new(Mutex::default);
+pub static JUST_ACCEPTED_TOS: Lazy<AtomicBool> = Lazy::new(AtomicBool::default);
+pub static JUST_LOADED_TOS: Lazy<AtomicBool> = Lazy::new(AtomicBool::default);
+/// Set once the policy has been verified against the server this session and
+/// found unchanged, so a still-accepted policy isn't re-fetched or re-prompted.
+pub static TOS_VERIFIED: Lazy<AtomicBool> = Lazy::new(AtomicBool::default);
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct AssetsChartFileSystem(pub String, pub String);
+
+#[async_trait]
+impl FileSystem for AssetsChartFileSystem {
+    async fn load_file(&mut self, path: &str) -> Result<Vec<u8>> {
+        if path == ":info" {
+            return Ok(serde_yaml::to_string(&ASSET_CHART_INFO.lock().unwrap().clone())?.into_bytes());
+        }
+        use crate::load_res;
+        if path == ":music" {
+            return Ok(load_res(&format!("res/song/{}/music", self.0)).await);
+        }
+        if path == ":illu" {
+            return Ok(load_res(&format!("res/song/{}/cover", self.0)).await);
+        }
+        if path == ":chart" {
+            return Ok(load_res(&format!("res/song/{}/{}", self.0, self.1)).await);
+        }
+        bail!("not found");
+    }
+
+    async fn exists(&mut self, _path: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn list_root(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    fn clone_box(&self) -> Box<dyn FileSystem> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+pub fn fs_from_path(path: &str) -> Result<Box<dyn FileSystem + Send + Sync + 'static>> {
+    if let Some(name) = path.strip_prefix(':') {
+        let (name, diff) = name.split_once(':').unwrap();
+        Ok(Box::new(AssetsChartFileSystem(name.to_owned(), diff.to_owned())))
+    } else {
+        fs::fs_from_file(Path::new(&format!("{}/{path}", dir::charts()?)))
+    }
+}
+
+pub fn confirm_dialog(title: impl Into<String>, content: impl Into<String>, res: Arc<AtomicBool>) {
+    Dialog::plain(title.into(), content.into())
+        .buttons(vec![ttl!("cancel").into_owned(), ttl!("confirm").into_owned()])
+        .listener(move |_dialog, id| {
+            if id == 1 {
+                res.store(true, Ordering::SeqCst);
+            }
+            false
+        })
+        .show();
+}
+
+pub fn check_read_tos_and_policy(change_just_accepted: bool, strict: bool) -> bool {
+    if let Some(value) = dispatch_tos_task() {
+        return value;
+    }
+    if get_data().terms_modified.is_some() && !strict {
+        return true;
+    }
+    // Verified against the server this session and still accepted: don't prompt.
+    if get_data().terms_modified.is_some() && TOS_VERIFIED.load(Ordering::Relaxed) {
+        return true;
+    }
+    match TERMS.get() {
+        Some(Some(modified)) => {
+            // The player already accepted exactly this version — don't re-prompt.
+            if get_data().terms_modified.as_deref() == Some(modified.as_str()) {
+                return true;
+            }
+            Dialog::plain(ttl!("tos-and-policy"), ttl!("tos-and-policy-desc"))
+                .links(vec![
+                    (ttl!("tos-link-terms").into_owned(), TERMS_URL.to_owned()),
+                    (ttl!("tos-link-privacy").into_owned(), PRIVACY_URL.to_owned()),
+                ])
+                .on_link(|i| {
+                    let url = match i {
+                        0 => TERMS_URL,
+                        1 => PRIVACY_URL,
+                        _ => return,
+                    };
+                    let _ = open_url(url);
+                })
+                .buttons(vec![ttl!("tos-deny").into_owned(), ttl!("tos-accept").into_owned()])
+                .listener(move |_dialog, pos| match pos {
+                    -2 | -1 => true,
+                    0 => {
+                        show_message(ttl!("warn-deny-tos-policy")).warn();
+                        false
+                    }
+                    1 => {
+                        get_data_mut().terms_modified = Some(modified.clone());
+                        let _ = save_data();
+                        if change_just_accepted {
+                            JUST_ACCEPTED_TOS.store(true, Ordering::Relaxed);
+                        }
+                        false
+                    }
+                    _ => true,
+                })
+                .show();
+        }
+        Some(None) => {
+            error!("unreachable")
+        }
+        None => {
+            if !strict {
+                warn!("loading data to read because `check_..` was called, this would result a delay and shouldn't happen");
+            }
+            load_tos_and_policy(true);
+        }
+    }
+    false
+}
+
+pub fn dispatch_tos_task() -> Option<bool> {
+    let mut tos_task = LOAD_TOS_TASK.lock().unwrap();
+    if let Some(task) = &mut *tos_task {
+        if let Some(result) = task.take() {
+            *tos_task = None;
+            drop(tos_task);
+            match result {
+                Ok(Some(res)) => {
+                    // New or changed policy: cache it and require (re-)acceptance.
+                    info!("terms and policy loaded");
+                    get_data_mut().terms_modified = None;
+                    let _ = save_data();
+                    let _ = TERMS.set(Some(res));
+                }
+                Ok(None) => {
+                    // Not modified: whatever the player accepted before is still
+                    // current. Mark the session verified so we neither refetch nor
+                    // prompt, and resume anything waiting on the TOS gate.
+                    info!("terms and policy unchanged");
+                    if get_data().terms_modified.is_some() {
+                        TOS_VERIFIED.store(true, Ordering::Relaxed);
+                        JUST_ACCEPTED_TOS.store(true, Ordering::Relaxed);
+                        return Some(true);
+                    }
+                }
+                Err(e) => {
+                    show_error(e.context(ttl!("fetch-tos-policy-failed")));
+                    return Some(false);
+                }
+            }
+            return None;
+        }
+    }
+    drop(tos_task);
+    None
+}
+/// use the return value to add a loading screen
+pub fn load_tos_and_policy(show_loading: bool) {
+    if TERMS.get().is_some() {
+        return;
+    }
+    let mut guard = LOAD_TOS_TASK.lock().unwrap();
+    if guard.is_none() {
+        let modified = get_data().terms_modified.clone();
+        let loading = show_loading.then(|| FullLoadingView::begin_text(ttl!("loading_tos_policy")));
+        *guard = Some(Task::new(async move {
+            // Always send If-Modified-Since so an unchanged, already-accepted
+            // policy comes back as "not modified" (304) and we can skip the
+            // prompt instead of re-fetching the full terms every time.
+            let ret = Client::fetch_terms(modified.as_deref()).await.context("failed to fetch terms");
+            drop(loading);
+            JUST_LOADED_TOS.store(true, Ordering::Relaxed);
+            ret
+        }));
+    }
+}
+
+#[inline]
+pub fn confirm_delete(res: Arc<AtomicBool>) {
+    Dialog::plain(ttl!("del-confirm").into_owned(), ttl!("del-confirm-content").into_owned())
+        .buttons(vec![ttl!("cancel").into_owned(), ttl!("confirm").into_owned()])
+        .listener(move |_dialog, id| {
+            if id == 1 {
+                res.store(true, Ordering::SeqCst);
+            }
+            false
+        })
+        .show();
+}
+
+pub fn gen_custom_dir() -> Result<(PathBuf, Uuid)> {
+    let dir = dir::custom_charts()?;
+    let dir = Path::new(&dir);
+    let mut id = Uuid::new_v4();
+    while dir.join(id.to_string()).exists() {
+        id = Uuid::new_v4();
+    }
+    let dir = dir.join(id.to_string());
+    std::fs::create_dir(&dir)?;
+
+    Ok((dir, id))
+}
+
+pub fn parse_warnings_to_string(w: &ParseWarnings) -> Option<String> {
+    let mut warnings = vec![];
+    if w.has_new_speed_events {
+        warnings.push(format!("- {}", itl!("warning-new-speed-event")));
+    }
+    if w.has_attach_ui {
+        warnings.push(format!("- {}", itl!("warning-attach-ui")));
+    }
+    if warnings.is_empty() {
+        None
+    } else {
+        Some(warnings.join("\n"))
+    }
+}
+
+async fn lint_chart(fs: &mut dyn FileSystem, info: &ChartInfo) -> Result<ParseWarnings> {
+    let bytes = GameScene::load_chart_bytes(fs, info).await.context("Failed to load chart")?;
+    let format = GameScene::infer_chart_format(info, &bytes);
+    if format != ChartFormat::Rpe {
+        return Ok(ParseWarnings::default());
+    }
+    let source = String::from_utf8_lossy(&bytes);
+    prpr::parse::lint(&source).await
+}
+
+pub async fn import_chart_to(dir: &Path, local_path: String, file: File) -> Result<(LocalChart, ParseWarnings)> {
+    let dir = prpr::dir::Dir::new(dir)?;
+    unzip_into(BufReader::new(file), &dir, true)?;
+    let mut fs = fs_from_path(&local_path)?;
+    let mut info = fs::load_info(fs.as_mut()).await.with_context(|| itl!("info-fail"))?;
+    let has_info_yml = fs.exists("info.yml").await?;
+    fs::fix_info_with(fs.as_mut(), &mut info, !has_info_yml)
+        .await
+        .with_context(|| itl!("invalid-chart"))?;
+    let warnings = if info.use_rpe_170_speed.is_none() || info.use_attach_ui_fix.is_none() {
+        if info.use_attach_ui_fix.is_none() {
+            info.use_attach_ui_fix = Some(true);
+        }
+        lint_chart(fs.as_mut(), &info).await?
+    } else {
+        ParseWarnings::default()
+    };
+    dir.create("info.yml")?.write_all(serde_yaml::to_string(&info)?.as_bytes())?;
+    Ok((
+        LocalChart {
+            info: info.into(),
+            local_path,
+            record: None,
+            mods: Mods::default(),
+            played_unlock: false,
+        },
+        warnings,
+    ))
+}
+
+pub async fn import_chart(file: File) -> Result<(LocalChart, ParseWarnings)> {
+    let (dir, id) = gen_custom_dir()?;
+    match import_chart_to(&dir, format!("custom/{id}"), file).await {
+        Err(err) => {
+            std::fs::remove_dir_all(dir)?;
+            Err(err)
+        }
+        Ok(val) => Ok(val),
+    }
+}
+
+pub struct LdbDisplayItem<'a> {
+    pub player_id: i32,
+    pub rank: u32,
+    pub score: String,
+    pub alt: Option<String>,
+    pub btn: &'a mut RectButton,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_ldb<'a>(
+    ui: &mut Ui,
+    title: &str,
+    w: f32,
+    rt: f32,
+    scroll: &mut Scroll,
+    fader: &mut Fader,
+    icon_user: &SafeTexture,
+    iter: Option<impl Iterator<Item = LdbDisplayItem<'a>>>,
+) {
+    use macroquad::prelude::*;
+
+    let pad = 0.03;
+    let width = w - pad;
+    ui.dy(0.01);
+    let r = ui.text(title).size(0.9).draw_using(&BOLD_FONT);
+    ui.dy(r.h + 0.05);
+    let sh = ui.top * 2. - r.h - 0.08;
+    let Some(iter) = iter else {
+        ui.loading(width / 2., sh / 2., rt, WHITE, ());
+        return;
+    };
+    let off = scroll.y_scroller.offset;
+    scroll.size((width, sh));
+    scroll.render(ui, |ui| {
+        render_release_to_refresh(ui, width / 2., off);
+        let s = 0.14;
+        let mut h = 0.;
+        ui.dx(0.02);
+        fader.reset();
+        let me = get_data().me.as_ref().map(|it| it.id);
+        fader.for_sub(|f| {
+            for item in iter {
+                f.render(ui, rt, |ui| {
+                    if me == Some(item.player_id) {
+                        ui.fill_path(&Rect::new(-0.02, 0., width, s).feather(-0.01).rounded(0.02), ui.background());
+                    }
+                    let r = s / 2. - 0.02;
+                    ui.text(format!("#{}", item.rank))
+                        .pos((0.18 - r) / 2., s / 2.)
+                        .anchor(0.5, 0.5)
+                        .no_baseline()
+                        .size(0.52)
+                        .draw_using(&PGR_FONT);
+                    let ct = (0.18, s / 2.);
+                    ui.avatar(ct.0, ct.1, r, rt, UserManager::opt_avatar(item.player_id, icon_user));
+                    item.btn.set(ui, Rect::new(ct.0 - r, ct.1 - r, r * 2., r * 2.));
+                    let mut rt = width - 0.04;
+                    if let Some(alt) = item.alt {
+                        let r = ui
+                            .text(alt)
+                            .pos(rt, s / 2.)
+                            .anchor(1., 0.5)
+                            .no_baseline()
+                            .size(0.4)
+                            .color(semi_white(0.6))
+                            .draw_using(&BOLD_FONT);
+                        rt -= r.w + 0.01;
+                    } else {
+                        rt -= 0.01;
+                    }
+                    let r = ui
+                        .text(item.score)
+                        .pos(rt, s / 2.)
+                        .anchor(1., 0.5)
+                        .no_baseline()
+                        .size(0.6)
+                        .draw_using(&PGR_FONT);
+                    rt -= r.w + 0.03;
+                    let lt = 0.25;
+                    if let Some((name, color)) = UserManager::name_and_color(item.player_id) {
+                        ui.text(name)
+                            .pos(lt, s / 2.)
+                            .anchor(0., 0.5)
+                            .no_baseline()
+                            .max_width(rt - lt - 0.01)
+                            .size(0.5)
+                            .color(color)
+                            .draw();
+                    }
+                });
+                ui.dy(s);
+                h += s;
+            }
+        });
+        (width, h)
+    });
+}
+
+pub fn render_release_to_refresh(ui: &mut Ui, cx: f32, off: f32) {
+    let p = (-off / Scroller::EXTEND).clamp(0., 1.);
+    ui.text(ttl!("release-to-refresh"))
+        .pos(cx, -0.2 + p * 0.07)
+        .anchor(0.5, 0.)
+        .size(0.8)
+        .color(semi_white(p * 0.8))
+        .draw();
+}
+
+#[cfg(test)]
+mod tests {
+    // #[tokio::test]
+    // #[ignore = "Chart parsing test"]
+    // async fn test_parse_chart() -> Result<()> {
+    //     // Put the chart in phira(workspace, not crate)/test which is ignored by git
+    //     let mut fs = fs_from_path("../../../test")?;
+    //     let info = load_info(fs.as_mut()).await?;
+    //     let _chart = prpr::scene::GameScene::load_chart(fs.deref_mut(), &info).await?;
+    //     Ok(())
+    // }
+}

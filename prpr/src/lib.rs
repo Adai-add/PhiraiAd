@@ -1,0 +1,38 @@
+pub mod auto_flip;
+pub mod bin;
+pub mod chart_play;
+pub mod config;
+pub mod core;
+pub mod dir;
+pub mod ext;
+pub mod fs;
+pub mod info;
+pub mod judge;
+pub mod judgement_range;
+pub mod parse;
+pub mod particle;
+pub mod play_report;
+pub mod practice_audio;
+pub mod practice_speed;
+pub mod scene;
+pub mod task;
+pub mod time;
+pub mod ui;
+
+#[cfg(feature = "log")]
+pub mod log;
+
+#[rustfmt::skip]
+#[cfg(closed)]
+pub mod inner;
+
+pub use scene::Main;
+
+pub fn build_conf() -> macroquad::window::Conf {
+    macroquad::window::Conf {
+        window_title: "Phira".to_string(),
+        window_width: 973,
+        window_height: 608,
+        ..Default::default()
+    }
+}

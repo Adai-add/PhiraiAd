@@ -1,0 +1,90 @@
+{
+  "checks": [
+    {
+      "case": "block_plus_one",
+      "models": 15,
+      "note_count": 38,
+      "group_count": 33,
+      "max_abs_difference": 1.9073486328125e-06
+    },
+    {
+      "case": "exact_block",
+      "models": 15,
+      "note_count": 37,
+      "group_count": 32,
+      "max_abs_difference": 0.0
+    },
+    {
+      "case": "geometry_holds",
+      "models": 15,
+      "note_count": 111,
+      "group_count": 97,
+      "max_abs_difference": 1.9073486328125e-06
+    },
+    {
+      "case": "one_group",
+      "models": 15,
+      "note_count": 2,
+      "group_count": 1,
+      "max_abs_difference": 9.5367431640625e-07
+    },
+    {
+      "case": "zero_speed_event",
+      "models": 15,
+      "note_count": 111,
+      "group_count": 97,
+      "max_abs_difference": 1.9073486328125e-06
+    },
+    {
+      "case": "real_chart",
+      "sample_id": "d6f1d03960986634bc97e2864ad0ecca1c3ef65edf129a9f81fb719122e33c35",
+      "models": 15,
+      "note_count": 1300,
+      "group_count": 912,
+      "max_abs_difference": 1.9073486328125e-06,
+      "portable_auto": {
+        "sample_id": "d6f1d03960986634bc97e2864ad0ecca1c3ef65edf129a9f81fb719122e33c35",
+        "predicted_constant": 16.84994888305664,
+        "model_std": 0.03987684780675151,
+        "model_count": 3,
+        "scope": "development_oof",
+        "models": [
+          {
+            "seed": 42,
+            "fold": 5,
+            "prediction": 16.899581909179688,
+            "seen_in_training": false
+          },
+          {
+            "seed": 43,
+            "fold": 5,
+            "prediction": 16.84832000732422,
+            "seen_in_training": false
+          },
+          {
+            "seed": 44,
+            "fold": 5,
+            "prediction": 16.801944732666016,
+            "seen_in_training": false
+          }
+        ]
+      },
+      "torch_auto": 16.84994888305664
+    }
+  ],
+  "tolerance": 0.0001,
+  "max_abs_difference": 1.9073486328125e-06,
+  "portable_dependency": "numpy",
+  "torch_version": "2.14.0+cpu",
+  "numpy_version": "2.3.5",
+  "status": "passed",
+  "numpy_only_import_test": "passed; torch import explicitly blocked",
+  "reference_regression_tests": {
+    "passed": 11,
+    "failed": 0,
+    "suites": [
+      "test_predictor",
+      "test_range_bias"
+    ]
+  }
+}

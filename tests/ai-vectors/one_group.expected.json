@@ -1,0 +1,97 @@
+{
+  "sample_id": "c086d425715479725e94ecfe4261bc3ebbe7836d14838fcf545426ac646edd1c",
+  "models": [
+    {
+      "model": "seed42_fold1",
+      "seed": 42,
+      "fold": 1,
+      "prediction": 13.223812103271484
+    },
+    {
+      "model": "seed42_fold2",
+      "seed": 42,
+      "fold": 2,
+      "prediction": 13.39438533782959
+    },
+    {
+      "model": "seed42_fold3",
+      "seed": 42,
+      "fold": 3,
+      "prediction": 13.56489086151123
+    },
+    {
+      "model": "seed42_fold4",
+      "seed": 42,
+      "fold": 4,
+      "prediction": 13.866268157958984
+    },
+    {
+      "model": "seed42_fold5",
+      "seed": 42,
+      "fold": 5,
+      "prediction": 13.648797988891602
+    },
+    {
+      "model": "seed43_fold1",
+      "seed": 43,
+      "fold": 1,
+      "prediction": 13.427245140075684
+    },
+    {
+      "model": "seed43_fold2",
+      "seed": 43,
+      "fold": 2,
+      "prediction": 13.253499984741211
+    },
+    {
+      "model": "seed43_fold3",
+      "seed": 43,
+      "fold": 3,
+      "prediction": 14.510581970214844
+    },
+    {
+      "model": "seed43_fold4",
+      "seed": 43,
+      "fold": 4,
+      "prediction": 13.451972007751465
+    },
+    {
+      "model": "seed43_fold5",
+      "seed": 43,
+      "fold": 5,
+      "prediction": 14.509339332580566
+    },
+    {
+      "model": "seed44_fold1",
+      "seed": 44,
+      "fold": 1,
+      "prediction": 13.425179481506348
+    },
+    {
+      "model": "seed44_fold2",
+      "seed": 44,
+      "fold": 2,
+      "prediction": 14.072596549987793
+    },
+    {
+      "model": "seed44_fold3",
+      "seed": 44,
+      "fold": 3,
+      "prediction": 14.089152336120605
+    },
+    {
+      "model": "seed44_fold4",
+      "seed": 44,
+      "fold": 4,
+      "prediction": 15.545771598815918
+    },
+    {
+      "model": "seed44_fold5",
+      "seed": 44,
+      "fold": 5,
+      "prediction": 13.490935325622559
+    }
+  ],
+  "all15_mean": 13.831628545125325,
+  "absolute_tolerance": 0.0001
+}

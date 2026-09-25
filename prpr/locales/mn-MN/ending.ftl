@@ -1,0 +1,14 @@
+retry = ДАХИН ОРОЛДОХ
+proceed = ҮРГЭЛЖЛҮҮЛЭХ
+new-best = ШИНЭ РЕКОРД
+max-combo = MAX COMBO
+rks-delta = RKS-ИЙН ӨӨРЧЛӨЛТ
+accuracy = Нарийвчлал
+error = Алдаа
+uploading = Үр дүнг байршуулж байна...
+uploaded = Үр дүн байршуулагдлаа
+upload-failed = Байршуулахад амжилтгүй боллоо
+upload-cancel = Байршуулахыг цуцлах
+upload-retry = Дахин байршуулах
+still-uploading = Үр дүнг байршуулж байна, түр хүлээнэ үү...
+detail = ДЭЛГЭРЭНГҮЙ

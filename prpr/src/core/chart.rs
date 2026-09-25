@@ -1,0 +1,232 @@
+use super::{BpmList, Effect, JudgeLine, JudgeLineKind, Matrix, Resource, UIElement, Vector};
+use crate::{
+    core::Object,
+    fs::FileSystem,
+    judge::{JudgeStatus, JudgementRangeProfile},
+    judgement_range::render_judgement_ranges,
+    ui::Ui,
+};
+use anyhow::{Context, Result};
+use macroquad::prelude::*;
+use nalgebra::Rotation2;
+use sasa::AudioClip;
+use std::{cell::RefCell, collections::HashMap};
+
+#[derive(Default)]
+pub struct ChartExtra {
+    pub effects: Vec<Effect>,
+    pub global_effects: Vec<Effect>,
+    #[cfg(feature = "video")]
+    pub videos: Vec<(super::Video, Option<super::VideoAttach>)>,
+}
+
+#[derive(Default)]
+pub struct ChartSettings {
+    pub pe_alpha_extension: bool,
+    pub hold_partial_cover: bool,
+}
+
+pub type HitSoundMap = HashMap<String, AudioClip>;
+pub type JudgementRangeRenderData<'a> = (&'a JudgementRangeProfile, &'a [(Vec<u32>, usize)]);
+
+pub struct Chart {
+    pub offset: f32,
+    pub lines: Vec<JudgeLine>,
+    pub bpm_list: RefCell<BpmList>,
+
+    pub settings: ChartSettings,
+    pub extra: ChartExtra,
+
+    /// Line order according to z-index, lines with attach_ui will be removed from this list
+    ///
+    /// Store the index of the line in z-index ascending order
+    pub order: Vec<usize>,
+    /// TODO: docs from RPE
+    pub attach_ui: [Option<usize>; 7],
+
+    pub hitsounds: HitSoundMap,
+}
+
+/// Preserve original note types for live editor switching without reparsing assets.
+pub struct NoteConversionBackup(Vec<Vec<(super::NoteKind, crate::judge::HitSound)>>);
+impl NoteConversionBackup {
+    pub fn capture(chart: &Chart) -> Self {
+        Self(
+            chart
+                .lines
+                .iter()
+                .map(|line| line.notes.iter().map(|n| (n.kind.clone(), n.hitsound.clone())).collect())
+                .collect(),
+        )
+    }
+    pub fn apply(&mut self, chart: &mut Chart, mode: crate::chart_play::NoteConversion) {
+        use crate::chart_play::NoteConversion;
+        for (line, originals) in chart.lines.iter_mut().zip(&mut self.0) {
+            for (note, (kind, sound)) in line.notes.iter_mut().zip(originals.iter()) {
+                note.kind = match mode {
+                    NoteConversion::Original => kind.clone(),
+                    NoteConversion::Tap => super::NoteKind::Click,
+                    NoteConversion::Drag => super::NoteKind::Drag,
+                    NoteConversion::Flick => super::NoteKind::Flick,
+                };
+                note.hitsound = if mode == NoteConversion::Original {
+                    sound.clone()
+                } else {
+                    crate::judge::HitSound::default_from_kind(&note.kind)
+                };
+            }
+            line.cache = super::JudgeLineCache::with_companion(&mut line.notes, originals);
+        }
+    }
+}
+
+impl Chart {
+    pub fn new(offset: f32, lines: Vec<JudgeLine>, bpm_list: BpmList, settings: ChartSettings, extra: ChartExtra, hitsounds: HitSoundMap) -> Self {
+        let mut attach_ui = [None; 7];
+        let mut order = (0..lines.len())
+            .filter(|it| {
+                if let Some(element) = lines[*it].attach_ui {
+                    attach_ui[element as usize - 1] = Some(*it);
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect::<Vec<_>>();
+        order.sort_by_key(|it| (lines[*it].z_index, *it));
+        Self {
+            offset,
+            lines,
+            bpm_list: RefCell::new(bpm_list),
+            settings,
+            extra,
+
+            order,
+            attach_ui,
+
+            hitsounds,
+        }
+    }
+
+    #[inline]
+    pub fn with_element<R>(
+        &self,
+        ui: &mut Ui,
+        res: &Resource,
+        element: UIElement,
+        scale_point: Option<(f32, f32)>,
+        rotation_point: (f32, f32),
+        f: impl FnOnce(&mut Ui, Color) -> R,
+    ) -> R {
+        let scale_point = scale_point.unwrap_or(rotation_point);
+        if let Some(id) = self.attach_ui[element as usize - 1] {
+            let lines = &self.lines;
+            let line = &lines[id];
+            let obj = &line.object;
+            let mut tr = line.fetch_pos(res, lines);
+            tr.y = -tr.y;
+            let color = self.lines[id].color.now_opt().unwrap_or(WHITE);
+            let scale = obj.now_scale(Vector::new(scale_point.0, scale_point.1));
+            let ro =
+                Object::new_rotation_wrt_point(Rotation2::new(-obj.rotation.now().to_radians()), Vector::new(rotation_point.0, rotation_point.1));
+            ui.with(Matrix::new_translation(&tr) * ro * scale, |ui| ui.alpha(obj.now_alpha().max(0.), |ui| f(ui, color)))
+        } else {
+            f(ui, WHITE)
+        }
+    }
+
+    pub async fn load_textures(&mut self, fs: &mut dyn FileSystem) -> Result<()> {
+        for line in &mut self.lines {
+            if let JudgeLineKind::Texture(tex, path) = &mut line.kind {
+                *tex = image::load_from_memory(&fs.load_file(path).await.with_context(|| format!("failed to load illustration {path}"))?)?.into();
+            }
+        }
+        Ok(())
+    }
+
+    pub fn reset(&mut self) {
+        self.lines
+            .iter_mut()
+            .flat_map(|it| it.notes.iter_mut())
+            .for_each(|note| note.judge = JudgeStatus::NotJudged);
+        for line in &mut self.lines {
+            line.cache.reset(&mut line.notes);
+        }
+        #[cfg(feature = "video")]
+        for (video, _) in &mut self.extra.videos {
+            if let Err(err) = video.reset() {
+                use crate::parse::{ptl, L10N_LOCAL};
+                crate::scene::show_error(err.context(ptl!("video-load-failed", "path" => video.video_file.path().to_string_lossy())));
+            }
+        }
+    }
+
+    pub fn update(&mut self, res: &mut Resource) {
+        for line in &mut self.lines {
+            line.object.set_time(res.time);
+        }
+        // TODO optimize
+        let trs = self.lines.iter().map(|it| it.now_transform(res, &self.lines)).collect::<Vec<_>>();
+        let rotations = self.lines.iter().map(|it| it.fetch_rot(&self.lines)).collect::<Vec<_>>();
+        for ((line, tr), rot) in self.lines.iter_mut().zip(trs).zip(rotations) {
+            line.update(res, tr, rot);
+        }
+        for effect in &mut self.extra.effects {
+            effect.update(res);
+        }
+        #[cfg(feature = "video")]
+        for (video, _) in &mut self.extra.videos {
+            if let Err(err) = video.update(res.time) {
+                tracing::warn!("video error: {err:?}");
+            }
+        }
+    }
+
+    pub fn render(&self, ui: &mut Ui, res: &mut Resource, judgement_ranges: Option<JudgementRangeRenderData<'_>>) {
+        #[cfg(feature = "video")]
+        for (video, attach) in &self.extra.videos {
+            if let Some(attach) = attach {
+                let line = &self.lines[attach.line];
+                let color = line.color.now_opt().unwrap_or(res.judge_line_color);
+                let mat = self.lines[attach.line].object.now(res);
+                res.apply_model_of(&mat, |res| {
+                    video.render(res.time, res.aspect_ratio, color);
+                });
+            } else {
+                video.render(res.time, res.aspect_ratio, WHITE);
+            }
+        }
+        let (flip_x, flip_y) = crate::chart_play::reflection_axes(res.config.flip_x(), false);
+        res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(flip_x, -flip_y)), |res| {
+            let mut guard = self.bpm_list.borrow_mut();
+            for id in &self.order {
+                self.lines[*id].render(ui, res, &self.lines, &mut guard, &self.settings, *id);
+            }
+            drop(guard);
+            res.note_buffer.borrow_mut().draw_all();
+            if let Some((profile, note_indices)) = judgement_ranges {
+                render_judgement_ranges(&self.lines, note_indices, res, profile);
+            }
+            if res.config.sample_count > 1 {
+                unsafe { get_internal_gl() }.flush();
+                if let Some(target) = &res.chart_target {
+                    target.blit();
+                }
+            }
+            if !res.no_effect {
+                let render = |res: &mut Resource| {
+                    for effect in &self.extra.effects {
+                        effect.render(res);
+                    }
+                };
+                if res.config.flip_x() {
+                    // Fullscreen postprocessing must keep its original orientation;
+                    // the source texture already contains the reflected notes.
+                    res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(flip_x, flip_y)), render);
+                } else {
+                    render(res);
+                }
+            }
+        });
+    }
+}

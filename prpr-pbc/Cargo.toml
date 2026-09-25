@@ -1,0 +1,10 @@
+[package]
+name = "prpr-pbc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+pollster = { workspace = true }
+prpr = { workspace = true }

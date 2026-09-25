@@ -1,0 +1,72 @@
+inner.rs
+
+/target
+/assets/font.ttf
+/cache
+/data
+/.cargo
+/config.txt
+/assets/background.jpg
+/assets/res
+/monitor-config.yml
+/.vscode
+
+/prpr-avc/static-lib
+
+# Mac
+
+._*
+.DS_Store
+/run_ios.sh
+/prebuild_ios.sh
+/build_ios.sh
+/build
+/*.ipa
+/phira.app
+/phira.xcodeproj/project.xcworkspace/xcuserdata/
+/xcode/LocalSigning.xcconfig
+/dist
+/project.yml
+/prpr.scent
+/.cargo
+
+# Test
+
+/test
+/log*
+/build_event_debug.sh
+
+
+# OHOS
+
+/phira/dist/
+
+# Local / secrets
+.env
+.env.*
+local.properties
+*.jks
+*.keystore
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Android signing
+keystore.properties
+signing.properties
+
+# Local IDE / system
+.idea/
+*.iml
+
+# Windows alternate data stream files
+*:Zone.Identifier
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Xcode user settings
+xcuserdata/
+*.xcuserstate

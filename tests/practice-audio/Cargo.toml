@@ -1,0 +1,10 @@
+[package]
+name = "phira-practice-audio-tests"
+version = "0.1.0"
+edition = "2021"
+[workspace]
+[dependencies]
+anyhow = "1"
+sasa = { git = "https://github.com/Mivik/sasa", rev = "e76229b", default-features = false }
+[build-dependencies]
+cc = "1"

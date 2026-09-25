@@ -1,0 +1,279 @@
+{
+  "formatVersion": 3,
+  "offset": -0.125,
+  "judgeLineList": [
+    {
+      "bpm": 120,
+      "notesAbove": [
+        {
+          "type": 3,
+          "time": 0,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 2,
+          "time": 4,
+          "positionX": -4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 8,
+          "positionX": -3,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 16,
+          "positionX": -1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 20,
+          "positionX": 0,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 28,
+          "positionX": 2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 28,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 1,
+          "time": 32,
+          "positionX": 3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 40,
+          "positionX": 5,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 44,
+          "positionX": -5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 52,
+          "positionX": -3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 56,
+          "positionX": -2,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 56,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 1,
+          "time": 64,
+          "positionX": 0,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 68,
+          "positionX": 1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 76,
+          "positionX": 3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 80,
+          "positionX": 4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 84,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 3,
+          "time": 88,
+          "positionX": -5,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 92,
+          "positionX": -4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 100,
+          "positionX": -2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 104,
+          "positionX": -1,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 112,
+          "positionX": 1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 112,
+          "positionX": 2,
+          "holdTime": 16,
+          "speed": 1
+        },
+        {
+          "type": 2,
+          "time": 116,
+          "positionX": 2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 124,
+          "positionX": 4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 128,
+          "positionX": 5,
+          "holdTime": 0,
+          "speed": 1.2
+        }
+      ],
+      "notesBelow": [
+        {
+          "type": 1,
+          "time": 0,
+          "positionX": -5,
+          "holdTime": 0,
+          "speed": -1
+        },
+        {
+          "type": 4,
+          "time": 12,
+          "positionX": -2,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 24,
+          "positionX": 1,
+          "holdTime": 28,
+          "speed": 1.2
+        },
+        {
+          "type": 2,
+          "time": 36,
+          "positionX": 4,
+          "holdTime": 0,
+          "speed": -1
+        },
+        {
+          "type": 1,
+          "time": 48,
+          "positionX": -4,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 60,
+          "positionX": -1,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 3,
+          "time": 72,
+          "positionX": 2,
+          "holdTime": 28,
+          "speed": -1
+        },
+        {
+          "type": 2,
+          "time": 84,
+          "positionX": 5,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 1,
+          "time": 96,
+          "positionX": -3,
+          "holdTime": 0,
+          "speed": 1.2
+        },
+        {
+          "type": 4,
+          "time": 108,
+          "positionX": 0,
+          "holdTime": 0,
+          "speed": -1
+        },
+        {
+          "type": 3,
+          "time": 120,
+          "positionX": 3,
+          "holdTime": 28,
+          "speed": 1.2
+        }
+      ]
+    }
+  ]
+}
