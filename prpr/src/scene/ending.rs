@@ -49,6 +49,7 @@ pub struct EndingScene {
     next: u8, // 0 -> none, 1 -> pop, 2 -> exit
     update_state: Option<RecordUpdateState>,
     rated: bool,
+    extra_status: String,
 
     upload_fn: Option<UploadFn>,
     upload_task: Option<(Task<Result<RecordUpdateState>>, MessageHandle)>,
@@ -98,6 +99,26 @@ impl EndingScene {
         let upload_task = upload_fn
             .as_ref()
             .and_then(|f| record_data.clone().map(|data| (f(data), show_message(tl!("uploading")).handle())));
+        // Capture the active judgement and per-chart options for the result label.
+        let mut extra_status = Vec::new();
+        if config.judgement_mode == crate::config::JudgementMode::PhigrosReplica {
+            extra_status.push(if config.phigros_strict_judgement {
+                "Phigros严格判定"
+            } else {
+                "Phigros判定"
+            });
+        }
+        match info.replica_play.note_conversion {
+            crate::chart_play::NoteConversion::Original => {}
+            crate::chart_play::NoteConversion::Tap => extra_status.push("All Tap Note"),
+            crate::chart_play::NoteConversion::Drag => extra_status.push("All Drag Note"),
+            crate::chart_play::NoteConversion::Flick => extra_status.push("All Flick Note"),
+        }
+        if config.judgement_range_debug.enabled {
+            extra_status.push("View Judgment Window");
+        }
+        let extra_status = extra_status.join(" | ");
+
         Ok(Self {
             background,
             illustration,
@@ -125,6 +146,7 @@ impl EndingScene {
                 })
             },
             rated: upload_task.is_some(),
+            extra_status,
 
             info,
             result,
@@ -552,7 +574,12 @@ impl Scene for EndingScene {
             } else {
                 spd
             };
-            let status_text = status_text.trim();
+            let status_text = [status_text.trim(), self.extra_status.as_str()]
+                .into_iter()
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let status_text = status_text.as_str();
             // mod_icons order: FLIP_X, FADE_OUT, FADE_IN, NIGHTCORE, RAINBOW
             let active_mod_indices: Vec<usize> = [
                 (Mods::FLIP_X, 0),
