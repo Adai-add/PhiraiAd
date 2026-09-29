@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Package a video-enabled ARM64 build using Android's official signing tools.
 
-Preserves the existing Android shell/resources, updates the manifest version,
+Preserves the Android shell, replaces launcher icons, updates the manifest version,
 replaces native libraries, removes stale signatures, aligns, signs and verifies.
 Passwords are read by apksigner from caller-named environment variables.
 """
@@ -16,6 +16,7 @@ import struct
 import subprocess
 import tempfile
 import zipfile
+import zlib
 
 from dex_density_dpi import patch_density_dpi, verify_density_dpi
 
@@ -30,6 +31,50 @@ ANDROID_ATTR_LABEL = 0x01010001
 def run(argv):
     """Run a tool without a shell; propagate nonzero exit status and diagnostics."""
     return subprocess.check_output([str(x) for x in argv], stderr=subprocess.STDOUT, text=True)
+
+
+def prepare_icon_replacements(base_apk, icon_path, badging):
+    """Replace the verified r23.0 launcher PNG without rebuilding resources.arsc."""
+    launcher = "res/mipmap/icon.png"
+    paths = set(re.findall(r"^application-icon-[^:]+:'([^']+)'", badging, re.MULTILINE))
+    if paths != {launcher}:
+        raise ValueError(f"Unsupported launcher resources: {sorted(paths)}; expected {launcher}")
+    data = icon_path.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("Icon must be a PNG image")
+    pos, kinds = 8, []
+    while pos < len(data):
+        if pos + 12 > len(data):
+            raise ValueError("Truncated PNG chunk")
+        length = struct.unpack_from(">I", data, pos)[0]
+        end = pos + 12 + length
+        if end > len(data):
+            raise ValueError("Truncated PNG payload")
+        kind = data[pos + 4:pos + 8]
+        if zlib.crc32(data[pos + 4:end - 4]) != struct.unpack_from(">I", data, end - 4)[0]:
+            raise ValueError("Invalid PNG checksum")
+        if not kinds:
+            if kind != b"IHDR" or length != 13:
+                raise ValueError("Invalid PNG header")
+            width, height = struct.unpack_from(">II", data, pos + 8)
+            if width != height or not 1 <= width <= 4096:
+                raise ValueError("Icon must be square and at most 4096 x 4096 pixels")
+        kinds.append(kind)
+        pos = end
+        if kind == b"IEND":
+            if length or pos != len(data):
+                raise ValueError("Invalid PNG ending")
+            break
+    if not kinds or kinds[-1] != b"IEND" or b"IDAT" not in kinds:
+        raise ValueError("Incomplete PNG image")
+    with zipfile.ZipFile(base_apk) as archive:
+        names = set(archive.namelist())
+        if launcher not in names:
+            raise ValueError("Base APK is missing its launcher PNG")
+        replacements = {launcher: data}
+        if "assets/icon.png" in names:
+            replacements["assets/icon.png"] = data
+    return replacements
 
 
 def check_arm64(data):
@@ -257,6 +302,12 @@ def main():
     parser.add_argument("--version-name", default="0.8.2-replica23.0-bugfix1")
     parser.add_argument("--version-code", type=int, default=10033)
     parser.add_argument("--app-label", default=DEFAULT_APP_LABEL)
+    icon_group = parser.add_mutually_exclusive_group()
+    icon_group.add_argument("--icon", type=Path,
+                            default=Path(__file__).resolve().parents[1] / "assets" / "icon.png",
+                            help="Launcher PNG (default: project assets/icon.png)")
+    icon_group.add_argument("--keep-base-icon", action="store_true",
+                            help="Preserve the base APK icons")
     args = parser.parse_args()
     for name in (args.ks_pass_env, args.key_pass_env):
         if not os.environ.get(name):
@@ -271,6 +322,7 @@ def main():
     before = run([aapt, "dump", "badging", args.base_apk])
     if f"name='{PACKAGE_NAME}'" not in before.splitlines()[0]:
         raise ValueError("The Android shell must belong to Phira Replica")
+    icon_replacements = {} if args.keep_base_icon else prepare_icon_replacements(args.base_apk, args.icon, before)
     old_name = re.search(r"versionName='([^']+)'", before).group(1)
     old_code = int(re.search(r"versionCode='(\d+)'", before).group(1))
     if args.version_code <= old_code:
@@ -289,7 +341,9 @@ def main():
                 if name.startswith("META-INF/"):
                     continue
                 content = src.read(info)
-                if name == "AndroidManifest.xml":
+                if name in icon_replacements:
+                    content = icon_replacements[name]
+                elif name == "AndroidManifest.xml":
                     content = patch_manifest(content, old_name, args.version_name, args.version_code, args.app_label)
                 elif name == "classes.dex":
                     content = patch_density_dpi(content)
@@ -325,6 +379,9 @@ def main():
         with zipfile.ZipFile(signed) as z:
             if z.testzip() is not None:
                 raise ValueError("Final APK ZIP CRC verification failed")
+            for name, expected in icon_replacements.items():
+                if z.read(name) != expected:
+                    raise ValueError(f"Final APK icon validation failed: {name}")
             verify_density_dpi(z.read("classes.dex"))
             if z.read("lib/arm64-v8a/libphira.so") != lib:
                 raise ValueError("Final APK does not contain the intended native library")
@@ -339,6 +396,7 @@ def main():
                     raise ValueError("Final APK added or lost a non-signature file")
                 expected_changes = {"AndroidManifest.xml", "lib/arm64-v8a/libphira.so",
                                     "lib/arm64-v8a/libc++_shared.so", "classes.dex"}
+                expected_changes.update(icon_replacements)
                 if z.read("classes.dex") != patch_density_dpi(original.read("classes.dex")):
                     raise ValueError("Unexpected DEX changes")
                 if any(original.read(n) != z.read(n) for n in names - expected_changes):
@@ -350,7 +408,9 @@ def main():
               "videoBuildMarker": True, "certificateSha256": CERT_SHA256,
               "package": badging.splitlines()[0], "signatureVerification": verification,
               "alignmentVerified": True, "androidDpiSource": "DisplayMetrics.densityDpi",
-              "appLabel": args.app_label, "deviceInstallationTested": False}
+              "appLabel": args.app_label, "deviceInstallationTested": False,
+              "iconResources": sorted(icon_replacements),
+              "iconSha256": hashlib.sha256(next(iter(icon_replacements.values()))).hexdigest() if icon_replacements else None}
     report_path = args.out.with_suffix(".verification.json")
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))

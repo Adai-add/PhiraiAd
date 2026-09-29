@@ -117,7 +117,11 @@ impl EndingScene {
         if config.judgement_range_debug.enabled {
             extra_status.push("View Judgment Window");
         }
-        let extra_status = extra_status.join(" | ");
+        let extra_status = if extra_status.is_empty() {
+            String::new()
+        } else {
+            format!("PhiraiAd: {}", extra_status.join(" | "))
+        };
 
         Ok(Self {
             background,
