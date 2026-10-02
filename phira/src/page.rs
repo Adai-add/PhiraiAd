@@ -1,4 +1,5 @@
 pub mod coll;
+pub mod timing_editor;
 pub use coll::CollectionPage;
 
 mod event;
@@ -10,6 +11,9 @@ pub use favorites::FavoritesPage;
 mod home;
 pub use home::HomePage;
 
+mod best_board;
+mod best_board_export;
+mod challenge;
 mod library;
 pub(crate) mod rks;
 pub use library::{request_export, resolve_export, take_export, ExportInfo, LibraryPage, CHOOSE_COVER, CHOSEN_COVER, FAV_UPDATED};
@@ -197,6 +201,10 @@ impl Illustration {
         } else {
             ((t - self.load_time) / Self::TIME).min(1.)
         }
+    }
+
+    pub fn aspect_ratio(&self) -> f32 {
+        self.texture.0.width() / self.texture.0.height().max(1.)
     }
 
     pub fn shading(&self, r: Rect, t: f32) -> impl Shading {

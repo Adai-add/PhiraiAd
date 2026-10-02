@@ -14,7 +14,7 @@ use crate::{
     config::{
         Config, Mods, NOTE_FLOW_SPEED_MAX, NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_STEP, PLAYBACK_SPEED_MAX, PLAYBACK_SPEED_MIN, PLAYBACK_SPEED_STEP,
     },
-    core::{copy_fbo, BadNote, Chart, ChartExtra, Effect, Point, Resource, UIElement, Vector, PGR_FONT},
+    core::{copy_fbo, BadNote, Chart, ChartExtra, Effect, Matrix, Point, Resource, UIElement, Vector, PGR_FONT},
     ext::{parse_time, screen_aspect, semi_white, RectExt, SafeTexture, ScaleType},
     fs::FileSystem,
     info::{ChartFormat, ChartInfo},
@@ -118,6 +118,13 @@ enum State {
     Ending,
 }
 
+/// Course scene transitions bypass the ordinary single-chart ending screen.
+pub enum ChallengeEvent {
+    Completed(crate::judge::PlayResult),
+    Restart,
+    Aborted,
+}
+
 pub struct GameScene {
     should_exit: bool,
     next_scene: Option<NextScene>,
@@ -143,6 +150,7 @@ pub struct GameScene {
     exercise_btns: (RectButton, RectButton),
     exercise_note_flow_speed: f32,
     exercise_note_flow_locked: bool,
+    exercise_extra_open: bool,
 
     pub music: Music,
 
@@ -169,6 +177,8 @@ pub struct GameScene {
     /// make the current run upload-eligible again.
     judgement_range_debug_used: bool,
     play_report: PlayReportRecorder,
+    timing_bar: crate::timing_bar::TimingBar,
+    preview_combo: Option<u32>,
     exercise_state_reset_pending: bool,
 
     dead: bool,
@@ -179,6 +189,7 @@ macro_rules! reset {
         $self.auto_flip.reset();
         $self.bad_notes.clear();
         $self.judge.reset();
+        $self.timing_bar.clear();
         $self.chart.reset();
         $res.judge_line_color = $res.res_pack.info.color_perfect();
         $self.music.pause()?;
@@ -265,6 +276,11 @@ impl GameScene {
         save_fn: Option<SaveFn>,
         report_fn: Option<ReportFn>,
     ) -> Result<Self> {
+        if config.challenge_mode {
+            config.enable_challenge();
+        }
+        let save_fn = if config.challenge_mode { None } else { save_fn };
+        let update_fn = if config.challenge_mode { None } else { update_fn };
         match mode {
             GameMode::TweakOffset | GameMode::EditChartPlay => {
                 config.mods.insert(Mods::AUTOPLAY);
@@ -277,11 +293,14 @@ impl GameScene {
             info.replica_play = settings;
         }
         info.replica_play.normalize();
+        // Embedded JSON settings are read above; override conversion only after that.
+        config.apply_challenge_chart(&mut info.replica_play);
         let mut note_conversion_backup = crate::core::NoteConversionBackup::capture(&chart);
         if matches!(mode, GameMode::Normal | GameMode::NoRetry | GameMode::Exercise | GameMode::EditChartPlay) {
             note_conversion_backup.apply(&mut chart, info.replica_play.note_conversion);
         }
-        let upload_fn = if config.blocks_score_upload()
+        let upload_fn = if config.challenge_mode
+            || config.blocks_score_upload()
             || info.replica_play.blocks_score_upload()
             || config.online_replica_active(info.id.is_some(), info.replica_play.blocks_score_upload())
         {
@@ -377,6 +396,7 @@ impl GameScene {
             exercise_btns: (RectButton::new(), RectButton::new()),
             exercise_note_flow_speed: 1.,
             exercise_note_flow_locked: false,
+            exercise_extra_open: false,
 
             music,
 
@@ -401,6 +421,8 @@ impl GameScene {
             fps_last_frame_time: 0.0,
             judgement_range_debug_used,
             play_report,
+            timing_bar: crate::timing_bar::TimingBar::default(),
+            preview_combo: None,
             exercise_state_reset_pending: false,
 
             dead: false,
@@ -480,7 +502,39 @@ impl GameScene {
     }
 
     fn capture_play_report_events(&mut self, song_time: f64, real_time: f64) {
-        self.play_report.record_events(self.judge.take_report_judgements());
+        let events = self.judge.take_report_judgements();
+        // Hold heads are emitted immediately, while Tap finals are queued until
+        // the end of judge.update. Restore input-time order within each frame.
+        let mut ordered: Vec<_> = events.iter().collect();
+        let input_time = |event: &crate::judge::JudgeReportEvent| {
+            self.chart
+                .lines
+                .get(event.line_id as usize)
+                .and_then(|line| line.notes.get(event.note_id as usize))
+                .map_or(event.time, |note| {
+                    if event.judgement == Ok(crate::judge::Judgement::Miss) {
+                        event.time
+                    } else {
+                        note.time + event.difference * self.res.config.speed as f64
+                    }
+                })
+        };
+        ordered.sort_by(|a, b| input_time(a).total_cmp(&input_time(b)));
+        for event in ordered {
+            if let Some(note) = self
+                .chart
+                .lines
+                .get(event.line_id as usize)
+                .and_then(|line| line.notes.get(event.note_id as usize))
+            {
+                let mut display_event = *event;
+                if event.judgement == Ok(crate::judge::Judgement::Miss) {
+                    display_event.difference = (event.time - note.time) / self.res.config.speed as f64;
+                }
+                self.timing_bar.record(&display_event, &note.kind, &self.res.config.timing_bar, real_time);
+            }
+        }
+        self.play_report.record_events(events);
         self.play_report
             .record_touch_debug(self.judge.take_touch_debug_records(), song_time, real_time);
     }
@@ -523,10 +577,23 @@ impl GameScene {
     fn reset_exercise_judgement_to(&mut self, song_time: f64) {
         self.bad_notes.clear();
         self.judge.reset_with_touch_debug_source(TouchDebugClearSource::ExerciseSettingsReset);
+        self.timing_bar.clear();
         self.chart.reset();
         let chart_time = (song_time - self.offset() as f64).max(0.);
         self.judge.advance_to(&mut self.chart, chart_time);
         self.res.judge_line_color = self.res.res_pack.info.color_perfect();
+    }
+
+    /// Static editor preview: reuse the complete gameplay rendering path without
+    /// playing audio, updating judgements, or invoking score/report callbacks.
+    pub fn render_timing_preview(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
+        self.preview_combo = Some(666);
+        self.state = State::Playing;
+        self.res.alpha = 1.;
+        self.res.time = 30.;
+        tm.seek_to(30.);
+        self.chart.update(&mut self.res);
+        <Self as Scene>::render(self, tm, ui)
     }
 
     fn ui(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
@@ -547,6 +614,7 @@ impl GameScene {
                 1. - (t / (AFTER_TIME + 0.3)).min(1.).powi(2)
             }
         } as f32;
+        let combo = self.preview_combo.unwrap_or_else(|| self.judge.combo());
         let res = &mut self.res;
         let eps = 2e-2 / res.aspect_ratio;
         let top = -1. / res.aspect_ratio;
@@ -625,13 +693,13 @@ impl GameScene {
                     ui.fill_rect(r, c);
                 },
             );
-            if self.judge.combo() >= 3 {
+            if combo >= 3 {
                 if legacy_aui {
                     let combo_top = top + eps * 2. - (1. - p) * 0.4;
                     let btm = self
                         .chart
                         .with_element(ui, res, UIElement::ComboNumber, None, (0., combo_top + unit_h / 2.), |ui, c| {
-                            ui.text(self.judge.combo().to_string())
+                            ui.text(combo.to_string())
                                 .pos(0., combo_top)
                                 .anchor(0.5, 0.)
                                 .color(c)
@@ -649,7 +717,7 @@ impl GameScene {
                                 .draw_using(&PGR_FONT);
                         });
                 } else {
-                    let combo = self.judge.combo().to_string();
+                    let combo = combo.to_string();
                     let ct = ui.text(&combo).size(1.0).measure().center();
                     let combo_y = top + eps * 2. - (1. - p) * 0.4 + ct.y;
                     let btm = self.chart.with_element(ui, res, UIElement::ComboNumber, None, (0., combo_y), |ui, c| {
@@ -721,6 +789,10 @@ impl GameScene {
     }
 
     fn overlay_ui(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
+        ui.abs_scope(|ui| self.overlay_ui_absolute(ui, tm))
+    }
+
+    fn overlay_ui_absolute(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
         if !tm.paused() || self.mode != GameMode::Exercise {
             Ui::clear_practice_speed_drag();
         }
@@ -820,14 +892,46 @@ impl GameScene {
                 ui.scope(|ui| {
                     ui.dx(-0.9);
                     ui.dy(-0.48);
-                    ui.checkbox(tl!("preserve-pitch"), &mut self.res.config.practice_preserve_pitch);
+                    ui.with(Matrix::new_scaling(crate::practice_view::EXTRA_PANEL_SCALE), |ui| {
+                        let label = if self.exercise_extra_open {
+                            "▾ 额外功能"
+                        } else {
+                            "▸ 额外功能"
+                        };
+                        if ui.button("exercise_extra", Rect::new(0., -0.01, 0.38, 0.065), label) {
+                            self.exercise_extra_open ^= true;
+                            Ui::clear_practice_speed_drag();
+                        }
+                        if self.exercise_extra_open {
+                            ui.dy(crate::practice_view::extra_panel_offset(0.08));
+                            ui.text("改变视角").size(0.4).draw();
+                            ui.dy(crate::practice_view::extra_panel_offset(0.055));
+                            ui.practice_value_slider(
+                                "exercise_view_scale",
+                                "大小",
+                                crate::practice_view::SCALE,
+                                &mut self.res.practice_view.scale_percent,
+                                Some(0.40),
+                            );
+                            ui.dy(crate::practice_view::extra_panel_offset(0.175));
+                            ui.practice_value_slider(
+                                "exercise_view_x",
+                                "中心 X",
+                                crate::practice_view::CENTER,
+                                &mut self.res.practice_view.center_x,
+                                Some(0.40),
+                            );
+                            ui.dy(crate::practice_view::extra_panel_offset(0.175));
+                            ui.practice_value_slider(
+                                "exercise_view_y",
+                                "中心 Y",
+                                crate::practice_view::CENTER,
+                                &mut self.res.practice_view.center_y,
+                                Some(0.40),
+                            );
+                        }
+                    });
                 });
-                if self.res.config.practice_preserve_pitch != previous_pitch {
-                    if let Err(error) = crate::practice_audio::save_preference(self.res.config.practice_preserve_pitch) {
-                        self.res.config.practice_preserve_pitch = previous_pitch;
-                        show_message(format!("{error:#}")).error();
-                    }
-                }
                 ui.scope(|ui| {
                     ui.dx(0.3);
                     ui.dy(-0.48);
@@ -856,15 +960,25 @@ impl GameScene {
                     }
                     ui.dy(0.19);
                     ui.checkbox(tl!("lock-note-flow-speed"), &mut self.exercise_note_flow_locked);
+                    ui.dy(0.07);
+                    ui.checkbox(tl!("preserve-pitch"), &mut self.res.config.practice_preserve_pitch);
                 });
+                if self.res.config.practice_preserve_pitch != previous_pitch {
+                    if let Err(error) = crate::practice_audio::save_preference(self.res.config.practice_preserve_pitch) {
+                        self.res.config.practice_preserve_pitch = previous_pitch;
+                        show_message(format!("{error:#}")).error();
+                    }
+                }
                 practice_settings_changed |= (self.res.config.speed - previous_playback_speed).abs() > f32::EPSILON
                     || (self.exercise_note_flow_speed - previous_manual_note_flow_speed).abs() > f32::EPSILON
                     || self.exercise_note_flow_locked != previous_note_flow_lock;
-                ui.dy(0.06);
+                let viewport_width = self.res.camera.viewport.map_or(screen_width(), |vp| vp.2 as f32);
+                let timeline_y = crate::practice_view::timeline_position(screen_height(), viewport_width);
+                ui.dy(timeline_y);
                 let hw = 0.7;
                 let h = 0.06;
-                let eh = 0.12;
                 let rad = 0.03;
+                let eh = 0.12_f32.min((1. / self.res.aspect_ratio - timeline_y - rad - 0.01).max(0.));
                 let sp = self.offset().min(0.) as f64;
                 ui.fill_rect(Rect::new(-hw, -h, hw * 2., h * 2.), GRAY);
                 let st = -hw + ((self.exercise_range.start - sp) / (self.res.track_length - sp)) as f32 * hw * 2.;
@@ -978,6 +1092,11 @@ impl GameScene {
         }
         if let Some(pos) = retry_requested {
             self.finish_play_report(ReportEndReason::Retry, pos, tm.real_time());
+            if self.res.config.challenge_mode {
+                self.music.pause()?;
+                self.next_scene = Some(NextScene::PopWithResult(Box::new(ChallengeEvent::Restart)));
+                return Ok(());
+            }
             reset!(self, self.res, tm);
             if self.mode == GameMode::Exercise {
                 let chart_time = (self.exercise_range.start - self.offset() as f64).max(0.);
@@ -1335,6 +1454,11 @@ impl Scene for GameScene {
                 let t = time - self.res.track_length - WAIT_TIME;
                 if t >= AFTER_TIME + 0.3 {
                     self.finish_play_report(ReportEndReason::Completed, self.res.track_length, tm.real_time());
+                    if self.res.config.challenge_mode {
+                        self.music.pause()?;
+                        self.next_scene = Some(NextScene::PopWithResult(Box::new(ChallengeEvent::Completed(self.judge.result()))));
+                        return Ok(());
+                    }
                     let mut record_data = None;
                     // TODO strengthen the protection
                     #[cfg(closed)]
@@ -1446,6 +1570,7 @@ impl Scene for GameScene {
             self.gl.quad_gl.viewport(None);
         }
         self.capture_play_report_events(song_time, tm.real_time());
+        self.timing_bar.animate(tm.real_time(), &self.res.config.timing_bar);
         if let Some(update) = &mut self.update_fn {
             update(self.res.time, &mut self.res, &mut self.judge);
         }
@@ -1546,6 +1671,17 @@ impl Scene for GameScene {
                             }
                         } else {
                             show_message(tl!("ex-speed-invalid", "min" => range.start, "max" => range.end)).error();
+                        }
+                    }
+                }
+                "exercise_view_scale" | "exercise_view_x" | "exercise_view_y" => {
+                    if self.mode == GameMode::Exercise && tm.paused() {
+                        if let Some(value) = crate::practice_view::parse(&text) {
+                            match id.as_str() {
+                                "exercise_view_scale" => self.res.practice_view.scale_percent = value,
+                                "exercise_view_x" => self.res.practice_view.center_x = value,
+                                _ => self.res.practice_view.center_y = value,
+                            }
                         }
                     }
                 }
@@ -1656,6 +1792,21 @@ impl Scene for GameScene {
         let h = 1. / res.aspect_ratio;
         draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
 
+        let transformed_view = self.mode == GameMode::Exercise && res.practice_view != Default::default();
+        if transformed_view {
+            push_camera_state();
+            let (cx, cy) = res.practice_view.center(res.camera.viewport.unwrap().2 as f32);
+            set_camera(&Camera2D {
+                target: vec2(cx, cy),
+                zoom: res.camera.zoom * res.practice_view.scale(),
+                viewport: chart_target_vp,
+                render_target: chart_onto,
+                ..Default::default()
+            });
+            self.gl.quad_gl.render_pass(chart_onto.map(|it| it.render_pass));
+            self.gl.quad_gl.viewport(chart_target_vp);
+        }
+
         let judgement_ranges = res
             .config
             .judgement_range_debug
@@ -1676,6 +1827,16 @@ impl Scene for GameScene {
         let dt = (t - std::mem::replace(&mut self.last_update_time, t)) as f32;
         if res.config.particle {
             res.emitter.draw(if self.auto_flip.rotating() { 0. } else { dt });
+        }
+        if transformed_view {
+            pop_camera_state();
+            self.gl.quad_gl.render_pass(
+                res.chart_target
+                    .as_ref()
+                    .map(|it| it.output().render_pass)
+                    .or_else(|| res.camera.render_pass()),
+            );
+            self.gl.quad_gl.viewport(chart_target_vp);
         }
         let rotating_canvas = self.res.rotate_chart;
         if !rotating_canvas {
@@ -1758,6 +1919,18 @@ impl Scene for GameScene {
             ui.abs_scope(|ui| self.edit_chart_play(ui, tm))?;
             pop_camera_state();
         }
+        if self.mode != GameMode::EditChartPlay && self.res.config.timing_bar.enabled {
+            let saved_viewport = self.gl.quad_gl.get_viewport();
+            push_camera_state();
+            set_camera(&Camera2D {
+                render_target: self.res.camera.render_target,
+                ..ui.camera()
+            });
+            let profile = self.judge.judgement_range_profile(&self.res.config);
+            ui.abs_scope(|ui| crate::timing_bar::render(ui, &self.res.config.timing_bar, &self.timing_bar, &profile));
+            pop_camera_state();
+            self.gl.quad_gl.viewport(saved_viewport);
+        }
         Ok(())
     }
 
@@ -1769,6 +1942,9 @@ impl Scene for GameScene {
             }
             tm.speed = 1.0;
             tm.adjust_time = false;
+            if self.res.config.challenge_mode {
+                return NextScene::PopWithResult(Box::new(ChallengeEvent::Aborted));
+            }
             match self.mode {
                 // return result to update score and refresh
                 GameMode::Normal => {

@@ -1140,6 +1140,29 @@ impl<'a> Ui<'a> {
         value: &mut f32,
         length: Option<f32>,
     ) -> Rect {
+        self.practice_value_slider(
+            input_id,
+            text,
+            crate::practice_view::SliderSpec {
+                min: range.start,
+                max: range.end,
+                midpoint: 1.,
+                step,
+                suffix: "",
+            },
+            value,
+            length,
+        )
+    }
+
+    pub fn practice_value_slider(
+        &mut self,
+        input_id: &str,
+        text: impl Into<String>,
+        spec: crate::practice_view::SliderSpec,
+        value: &mut f32,
+        length: Option<f32>,
+    ) -> Rect {
         let text = text.into();
         let len = length.unwrap_or(0.46);
         let cy = 0.115;
@@ -1164,7 +1187,7 @@ impl<'a> Ui<'a> {
                     let Vec2 { x, y } = touch.position;
                     let (x, _) = self.to_local((x, y));
                     if touch.phase != TouchPhase::Cancelled {
-                        *value = crate::practice_speed::drag_value(x / len, &range, step);
+                        *value = spec.drag_value(x / len);
                     }
                     if matches!(touch.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                         *entry = None;
@@ -1177,7 +1200,12 @@ impl<'a> Ui<'a> {
             let label = self.text(&text).size(0.4).max_width(len - 0.18).no_baseline().draw();
             let number = Rect::new(label.right() + 0.012, label.y - 0.012, 0.16, 0.07);
             self.fill_path(&number.rounded(0.01), self.background());
-            self.text(crate::practice_speed::display(*value))
+            let number_text = if input_id.starts_with("exercise_view_") {
+                value.to_string()
+            } else {
+                crate::practice_speed::display(*value)
+            };
+            self.text(format!("{}{}", number_text, spec.suffix))
                 .pos(number.center().x, number.center().y)
                 .anchor(0.5, 0.5)
                 .size(0.36)
@@ -1185,17 +1213,17 @@ impl<'a> Ui<'a> {
                 .no_baseline()
                 .draw();
             if self.clicked(number, state.entry(input_id.to_owned()).or_default()) {
-                request_input(input_id, InputBox::new().default_text(crate::practice_speed::display(*value)));
+                request_input(input_id, InputBox::new().default_text(number_text));
             }
 
             self.fill_rect(Rect::new(0., cy - 0.002, len, 0.004), WHITE);
             self.fill_rect(Rect::new(len * 0.5 - 0.001, cy - 0.008, 0.002, 0.016), WHITE);
-            let p = crate::practice_speed::position(*value, &range);
+            let p = spec.position(*value);
             self.fill_circle(len * p, cy, 0.019, self.accent());
             let button_size = 0.08;
             let gap = 0.025;
             let mut x = len + 0.035;
-            for (label, delta, suffix) in [("−", -step, "-"), ("+", step, "+")] {
+            for (label, delta, suffix) in [("−", -spec.step, "-"), ("+", spec.step, "+")] {
                 let r = Rect::new(x, cy - button_size / 2., button_size, button_size);
                 self.fill_path(&r.rounded(0.012), self.background());
                 self.text(label)
@@ -1206,7 +1234,7 @@ impl<'a> Ui<'a> {
                     .no_baseline()
                     .draw();
                 if self.clicked(r, state.entry(format!("{input_id}:{suffix}")).or_default()) {
-                    *value = (*value + delta).clamp(range.start, range.end);
+                    *value = (*value + delta).clamp(spec.min, spec.max);
                 }
                 x += button_size + gap;
             }
@@ -1218,7 +1246,14 @@ impl<'a> Ui<'a> {
     pub fn clear_practice_speed_drag() {
         STATE.with(|state| {
             let mut state = state.borrow_mut();
-            for id in ["exercise_speed", "exercise_note_flow"] {
+            for id in [
+                "exercise_speed",
+                "exercise_note_flow",
+                "exercise_extra",
+                "exercise_view_scale",
+                "exercise_view_x",
+                "exercise_view_y",
+            ] {
                 for suffix in ["", ":drag", ":-", ":+"] {
                     state.remove(&format!("{id}{suffix}"));
                 }

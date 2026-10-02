@@ -414,6 +414,7 @@ pub struct Resource {
     /// Practice-mode visual multiplier for note travel distance. This never
     /// changes chart time, audio playback, or judgement windows.
     pub note_flow_speed: f32,
+    pub practice_view: crate::practice_view::PracticeView,
     /// Input-space half-turn; drawing uses a final framebuffer rotation.
     pub auto_flip_y: bool,
     pub rotate_chart: bool,
@@ -539,6 +540,7 @@ impl Resource {
             last_vp: (0, 0, 0, 0),
             note_width,
             note_flow_speed: 1.,
+            practice_view: Default::default(),
             auto_flip_y: false,
             rotate_chart: false,
 
@@ -627,6 +629,19 @@ impl Resource {
             self.camera.viewport = Some(viewport(self.aspect_ratio, vp));
         };
         true
+    }
+
+    /// Visibility tests use the same camera view as the rendered chart.
+    pub fn chart_view_point(&self, pt: Point, inverse: bool) -> Point {
+        let width = self.camera.viewport.map_or(self.last_vp.2, |vp| vp.2).max(1) as f32;
+        let (cx, cy) = self.practice_view.center(width);
+        let cx = if self.config.flip_x() { -cx } else { cx };
+        let scale = self.practice_view.scale();
+        if inverse {
+            Point::new(pt.x / scale + cx, pt.y / scale - cy)
+        } else {
+            Point::new((pt.x - cx) * scale, (pt.y + cy) * scale)
+        }
     }
 
     pub fn world_to_screen(&self, pt: Point) -> Point {

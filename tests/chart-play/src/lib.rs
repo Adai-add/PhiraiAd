@@ -434,16 +434,16 @@ mod custom_rks_tests {
 }
 
 #[test]
-fn hold_head_effect_defaults_on_migrates_and_persists_without_score_gate() {
+fn hold_head_effect_defaults_off_and_persists_without_score_gate() {
     let mut c: config::Config = serde_json::from_str("{}").unwrap();
-    assert!(c.hold_head_effect);
+    assert!(!c.hold_head_effect);
     assert!(!c.blocks_score_upload());
-    c.hold_head_effect = false;
+    c.hold_head_effect = true;
     let saved = serde_json::to_vec(&c).unwrap();
     let restored: config::Config = serde_json::from_slice(&saved).unwrap();
-    assert!(!restored.hold_head_effect);
+    assert!(restored.hold_head_effect);
     assert!(!restored.blocks_score_upload());
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&saved).unwrap()["holdHeadEffect"], false);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&saved).unwrap()["holdHeadEffect"], true);
 }
 
 #[cfg(test)]
@@ -547,3 +547,6 @@ fn global_flip_default_and_conversion_settings_roundtrip() {
         let v:serde_json::Value=serde_json::from_slice(&out).unwrap();assert_eq!(v["judgeLineList"][0]["notes"],serde_json::json!([1,2,3]));
     }
 }
+
+#[path = "../../../prpr/src/practice_view.rs"]
+pub mod practice_view;

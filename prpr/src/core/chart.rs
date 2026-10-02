@@ -214,6 +214,22 @@ impl Chart {
                 }
             }
             if !res.no_effect {
+                let transformed_view = res.practice_view != Default::default();
+                if transformed_view {
+                    push_camera_state();
+                    let viewport = res.camera.viewport.map(|vp| {
+                        if res.chart_target.is_some() {
+                            (vp.0 - res.last_vp.0, vp.1 - res.last_vp.1, vp.2, vp.3)
+                        } else {
+                            vp
+                        }
+                    });
+                    set_camera(&Camera2D {
+                        render_target: res.chart_target.as_ref().map(|target| target.output()).or(res.camera.render_target),
+                        viewport,
+                        ..res.camera
+                    });
+                }
                 let render = |res: &mut Resource| {
                     for effect in &self.extra.effects {
                         effect.render(res);
@@ -225,6 +241,9 @@ impl Chart {
                     res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(flip_x, flip_y)), render);
                 } else {
                     render(res);
+                }
+                if transformed_view {
+                    pop_camera_state();
                 }
             }
         });

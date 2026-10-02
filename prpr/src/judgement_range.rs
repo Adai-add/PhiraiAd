@@ -52,6 +52,11 @@ fn point_base_at(note: &Note, line: &JudgeLine, ctrl: &CtrlObject, res: &Resourc
 }
 
 fn current_note_half_width(note: &Note, line: &JudgeLine, ctrl: &CtrlObject, res: &Resource, x_limit: f64) -> f32 {
+    if res.config.judgement_mode == crate::config::JudgementMode::PhigrosReplica {
+        // Replica hit regions follow screen height, independently of sprite
+        // size, sizeControl, multiple hints and RPE's judgeArea extension.
+        return x_limit as f32;
+    }
     let line_height = line.height.now() as f64;
     let ctrl_height = if note.speed.abs() <= f64::EPSILON {
         note.height - line_height

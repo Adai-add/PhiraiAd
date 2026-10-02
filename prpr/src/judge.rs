@@ -1,5 +1,6 @@
 //! Judgement system
 
+use crate::phigros_judge as replica;
 use crate::{
     config::{Config, JudgementMode},
     core::{BadNote, Chart, Matrix, NoteKind, Point, Resource, Vector, NOTE_WIDTH_RATIO_BASE},
@@ -31,11 +32,10 @@ pub const DIST_FACTOR: f64 = 0.2;
 const EARLY_OFFSET: f64 = 0.07;
 const PHIRA_X_MAX: f64 = 0.21 / (16. / 9.) * 2.;
 
-// Phigros 3.20.0 normal-mode constants. PGR's horizontal note coordinate is
-// converted to prpr's normalized coordinate by 2 * 9 / 160.
+// Documented Phigros normal/strict timing constants. This fixed unit is only
+// the 16:9 reference and PGR note-position conversion; live hit regions and
+// Flick motion use screen height via replica::world_unit instead.
 const PHIGROS_X_UNIT: f64 = 2. * 9. / 160.;
-const PHIGROS_TAP_X: f64 = 1.9 * PHIGROS_X_UNIT;
-const PHIGROS_DRAG_X: f64 = 2.1 * PHIGROS_X_UNIT;
 const PHIGROS_LIMIT_PERFECT: f64 = 0.08;
 const PHIGROS_LIMIT_GOOD: f64 = 0.18;
 const PHIGROS_LIMIT_BAD: f64 = 0.22;
@@ -45,7 +45,6 @@ const PHIGROS_STRICT_PERFECT_BASE: f64 = 0.04;
 const PHIGROS_STRICT_GOOD_BASE: f64 = 0.09;
 const PHIGROS_STRICT_BAD_BASE: f64 = 0.14;
 const PHIGROS_FRAME_TIME_SAMPLES: usize = 10;
-const PHIGROS_RESOLVE_EARLY: f64 = 0.005;
 const PHIGROS_HOLD_TAIL: f64 = 0.22;
 
 pub fn hold_tail_window(config: &Config) -> f64 {
@@ -55,7 +54,6 @@ pub fn hold_tail_window(config: &Config) -> f64 {
         LIMIT_BAD
     }
 }
-const PHIGROS_CANDIDATE_EPSILON: f64 = 0.010;
 
 #[derive(Debug, Clone)]
 pub enum HitSound {
@@ -154,18 +152,17 @@ impl FlickTracker {
     }
 
     pub fn push(&mut self, time: f32, position: Point) {
+        self.push_with_delta(time, position, time - self.last_time);
+    }
+
+    fn push_with_delta(&mut self, time: f32, position: Point, frame_delta: f32) {
         let delta = position - self.last_point;
         self.last_point = position;
-        let dt = (time - self.last_time).max(1e-6);
+        let dt = frame_delta.max(1e-6);
         if self.official {
-            let projected_speed = if self.last_delta.is_some_and(|it| it.magnitude() > 0.1) {
-                let last = self.last_delta.unwrap();
-                last.dot(&delta) / last.magnitude()
-            } else {
-                self.previous_flick_speed
-            } / (60. * dt);
+            let previous = self.last_delta.unwrap_or_else(Vector::zeros);
+            let (projected_speed, current_speed) = replica::flick_speeds([previous.x, previous.y], [delta.x, delta.y], dt);
             if projected_speed < self.threshold || self.stopped {
-                let current_speed = delta.magnitude() / (60. * dt);
                 self.flicked = current_speed >= self.threshold * 5.;
                 self.stopped = current_speed < self.threshold * 5.;
             }
@@ -196,8 +193,8 @@ impl FlickTracker {
 }
 
 #[inline]
-fn to_phigros_motion_point(point: Vec2) -> Point {
-    Point::new(point.x / PHIGROS_X_UNIT as f32, point.y / PHIGROS_X_UNIT as f32)
+fn to_phigros_motion_point(point: Vec2, unit: f64) -> Point {
+    Point::new(point.x / unit as f32, point.y / unit as f32)
 }
 
 #[inline]
@@ -266,11 +263,11 @@ fn complete_finger_snapshots(touches: &mut HashMap<u64, Touch>, active: &HashMap
     }
 }
 
-fn rebind_official_flick_tracker(trackers: &mut HashMap<u64, FlickTracker>, id: u64, dpi: u32, frame_time: f32, position: Vec2) -> bool {
+fn rebind_official_flick_tracker(trackers: &mut HashMap<u64, FlickTracker>, id: u64, dpi: u32, frame_time: f32, position: Vec2, unit: f64) -> bool {
     if trackers.contains_key(&id) {
         return false;
     }
-    trackers.insert(id, FlickTracker::new(dpi, frame_time, to_phigros_motion_point(position), true));
+    trackers.insert(id, FlickTracker::new(dpi, frame_time, to_phigros_motion_point(position, unit), true));
     true
 }
 
@@ -469,99 +466,9 @@ fn raw_touch_debug_source(id: u64, phase: TouchPhase) -> TouchDebugSampleSource 
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OfficialClickKind {
-    Tap,
-    Drag,
-    Hold,
-    Flick,
-}
-
-impl OfficialClickKind {
-    #[inline]
-    fn from_note(kind: &NoteKind) -> Self {
-        match kind {
-            NoteKind::Click => Self::Tap,
-            NoteKind::Drag => Self::Drag,
-            NoteKind::Hold { .. } => Self::Hold,
-            NoteKind::Flick => Self::Flick,
-        }
-    }
-
-    #[inline]
-    fn is_tap_or_hold(self) -> bool {
-        matches!(self, Self::Tap | Self::Hold)
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct OfficialClickCandidate {
-    line_id: usize,
-    note_id: u32,
-    time: f64,
-    spatial: f64,
-    diff: f64,
-    kind: OfficialClickKind,
-}
-
-fn choose_official_click_candidate(candidates: &mut [OfficialClickCandidate], frame_time: f64) -> Option<OfficialClickCandidate> {
-    // Phigros scans one global, time-sorted note list. Drag/Flick are weak
-    // candidates: a later eligible note may replace them. Once Tap/Hold owns
-    // the candidate, only another Tap/Hold within 10 ms may replace it, and
-    // then only when its local-space position cost is lower.
-    candidates.sort_unstable_by(|a, b| {
-        a.time
-            .total_cmp(&b.time)
-            .then_with(|| a.line_id.cmp(&b.line_id))
-            .then_with(|| a.note_id.cmp(&b.note_id))
-    });
-    let mut selected: Option<OfficialClickCandidate> = None;
-    for candidate in candidates.iter().copied() {
-        let Some(current) = selected else {
-            selected = Some(candidate);
-            continue;
-        };
-        if candidate.time - frame_time > (current.time - frame_time).abs() + PHIGROS_CANDIDATE_EPSILON {
-            continue;
-        }
-        if !current.kind.is_tap_or_hold()
-            || (candidate.kind.is_tap_or_hold()
-                && (candidate.time - current.time).abs() <= PHIGROS_CANDIDATE_EPSILON
-                && candidate.spatial < current.spatial)
-        {
-            selected = Some(candidate);
-        }
-    }
-    selected
-}
-
-#[inline]
-fn hold_contact_lost(safe_frame: &mut i8) -> bool {
-    if *safe_frame >= 0 {
-        *safe_frame -= 1;
-        false
-    } else {
-        true
-    }
-}
-
-#[inline]
-fn arm_hold_visual_tail(tail_armed: &mut bool) -> bool {
-    !mem::replace(tail_armed, true)
-}
-
 #[inline]
 fn hold_visual_tail_ended(tail_armed: bool, end_time: f64, time: f64) -> bool {
     tail_armed && time >= end_time
-}
-
-#[inline]
-fn note_uses_phigros_judgement(kind: &NoteKind, other_official: bool, flick_official: bool) -> bool {
-    if matches!(kind, NoteKind::Flick) {
-        flick_official
-    } else {
-        other_official
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -831,6 +738,10 @@ pub struct Judge {
     // latest (up to) ten Time.deltaTime samples to its P/G/B base windows.
     recent_frame_times: RecentFrameTimes,
 
+    replica: replica::Judge,
+    replica_world_unit: f64,
+    official_tracker_clock: f32,
+
     touch_debug_enabled: bool,
     touch_debug_sequence: u64,
     touch_debug_frame_index: u64,
@@ -862,6 +773,24 @@ pub fn take_wheel() -> (f32, f32) {
 
 impl Judge {
     pub fn new(chart: &Chart) -> Self {
+        let replica = replica::Judge::new(
+            chart
+                .lines
+                .iter()
+                .enumerate()
+                .flat_map(|(line_id, line)| {
+                    line.notes.iter().enumerate().filter(|(_, note)| !note.fake).map(move |(note_id, note)| {
+                        let (kind, end_time) = match note.kind {
+                            NoteKind::Click => (replica::Kind::Tap, note.time),
+                            NoteKind::Hold { end_time, .. } => (replica::Kind::Hold, end_time),
+                            NoteKind::Drag => (replica::Kind::Drag, note.time),
+                            NoteKind::Flick => (replica::Kind::Flick, note.time),
+                        };
+                        replica::Note::new(line_id, note_id as u32, note.time, end_time, kind)
+                    })
+                })
+                .collect(),
+        );
         let notes = chart
             .lines
             .iter()
@@ -879,6 +808,9 @@ impl Judge {
             active_fingers: HashMap::new(),
             finger_order: Vec::new(),
             recent_frame_times: RecentFrameTimes::default(),
+            replica,
+            replica_world_unit: PHIGROS_X_UNIT,
+            official_tracker_clock: 0.,
 
             touch_debug_enabled: false,
             touch_debug_sequence: 0,
@@ -901,6 +833,7 @@ impl Judge {
         self.notes.iter_mut().for_each(|it| it.1 = 0);
         self.clear_touch_input_with_source(source);
         self.recent_frame_times.clear();
+        self.replica.reset();
         self.inner.reset();
         self.judgements.borrow_mut().clear();
         self.report_judgements.borrow_mut().clear();
@@ -930,6 +863,7 @@ impl Judge {
         self.trackers.clear();
         self.active_fingers.clear();
         self.finger_order.clear();
+        self.official_tracker_clock = 0.;
     }
 
     pub fn set_touch_debug_enabled(&mut self, enabled: bool) {
@@ -974,10 +908,10 @@ impl Judge {
                     early: windows.bad,
                     late: windows.good,
                 },
-                PHIGROS_TAP_X,
-                PHIGROS_TAP_X,
+                1.9 * self.replica_world_unit,
+                1.9 * self.replica_world_unit,
                 JudgementTimeWindow::symmetric(PHIGROS_DRAG_WINDOW),
-                PHIGROS_DRAG_X,
+                2.1 * self.replica_world_unit,
             )
         } else {
             (
@@ -993,7 +927,7 @@ impl Judge {
             )
         };
         let (flick_outer, flick_x) = if flick_phigros {
-            (JudgementTimeWindow::symmetric(windows.flick), PHIGROS_DRAG_X)
+            (JudgementTimeWindow::symmetric(windows.flick), 2.1 * self.replica_world_unit)
         } else {
             (JudgementTimeWindow::phira(LIMIT_BAD), PHIRA_X_MAX)
         };
@@ -1049,6 +983,7 @@ impl Judge {
         line_id: u32,
         note_id: u32,
         perfect: bool,
+        difference: f64,
     ) {
         judgements.borrow_mut().push((t, line_id, note_id, Err(perfect)));
         report_judgements.borrow_mut().push(JudgeReportEvent {
@@ -1056,7 +991,7 @@ impl Judge {
             line_id,
             note_id,
             judgement: Err(perfect),
-            difference: 0.,
+            difference,
         });
     }
 
@@ -1125,6 +1060,18 @@ impl Judge {
         }
     }
 
+    fn chart_touch_transform(flip_x: bool, flip_y: bool, view: crate::practice_view::PracticeView) -> impl Fn(&mut Touch) {
+        let transform = Self::touch_transform(false, false);
+        let width = get_viewport().2 as f32;
+        let rotation = if flip_y { -1. } else { 1. };
+        let chart_flip = if flip_x ^ flip_y { -1. } else { 1. };
+        move |touch| {
+            transform(touch);
+            let (x, y) = view.screen_to_chart(touch.position.x * rotation, touch.position.y * rotation, width);
+            touch.position = vec2(x * chart_flip, y);
+        }
+    }
+
     pub fn get_touches() -> Vec<Touch> {
         TOUCHES.with(|it| {
             let guard = it.borrow();
@@ -1161,11 +1108,31 @@ impl Judge {
             PhigrosWindows::normal()
         };
         let spd = res.config.speed as f64;
+        let phigros_unit = replica::world_unit(screen_height() as f64, get_viewport().2 as f64);
+        if flick_official {
+            let scale = (self.replica_world_unit / phigros_unit) as f32;
+            for tracker in self.trackers.values_mut().filter(|tracker| tracker.official) {
+                tracker.last_point.coords *= scale;
+                if let Some(delta) = &mut tracker.last_delta {
+                    *delta *= scale;
+                }
+            }
+        }
+        self.replica_world_unit = phigros_unit;
+        self.official_tracker_clock += get_frame_time().max(1e-6);
 
         let uptime = get_uptime();
 
         let t = res.time;
         let flip_x = res.config.flip_x() ^ res.auto_flip_y;
+        let view = res.practice_view;
+        let viewport_width = get_viewport().2 as f32;
+        let chart_flip = if res.config.flip_x() { -1. } else { 1. };
+        // Flick velocity remains a physical finger movement, independent of zoom.
+        let motion_position = |point: Vec2| {
+            let (x, y) = view.chart_to_screen(point.x * chart_flip, point.y, viewport_width);
+            vec2(x * chart_flip, y)
+        };
         let debug_active_before = touch_debug_enabled.then(|| touch_debug_finger_states(&self.active_fingers));
         let debug_order_before = touch_debug_enabled.then(|| self.finger_order.clone());
         let debug_trackers_before = touch_debug_enabled.then(|| touch_debug_tracker_states(&self.trackers));
@@ -1213,7 +1180,7 @@ impl Judge {
                     TouchDebugSampleSource::MacroquadMouseSnapshot,
                 ));
             }
-            let tr = Self::touch_transform(flip_x, res.auto_flip_y);
+            let tr = Self::chart_touch_transform(flip_x, res.auto_flip_y, res.practice_view);
             touches
                 .into_iter()
                 .map(|(mut it, source)| {
@@ -1275,9 +1242,9 @@ impl Judge {
             }
             let delta = (t / spd - self.last_time) / (events.len() + 1) as f64;
             let mut tracker_time = self.last_time;
-            let official_frame_time = (t / spd) as f32;
+            let official_frame_time = self.official_tracker_clock;
             let mut official_started = HashSet::new();
-            let event_transform = Self::touch_transform(flip_x, res.auto_flip_y);
+            let event_transform = Self::chart_touch_transform(flip_x, res.auto_flip_y, res.practice_view);
             for Touch {
                 id,
                 phase,
@@ -1298,7 +1265,7 @@ impl Judge {
                 let judge_point = transformed_touch.position;
                 if touch_debug_enabled {
                     let mapped_time = if time.is_infinite() { t } else { t - (uptime - time) * spd };
-                    let phigros_point = to_phigros_motion_point(judge_point);
+                    let phigros_point = to_phigros_motion_point(motion_position(judge_point), phigros_unit);
                     let sequence = self.next_touch_debug_sequence();
                     debug_raw_events.push(TouchDebugSample {
                         sequence,
@@ -1323,7 +1290,7 @@ impl Judge {
                 let tracker_point = if flick_official {
                     // The 0.06 * dpi / 380 Flick thresholds are expressed in
                     // Phigros world units, not prpr's normalized [-1, 1] space.
-                    to_phigros_motion_point(judge_point)
+                    to_phigros_motion_point(motion_position(judge_point), phigros_unit)
                 } else {
                     phira_tracker_point
                 };
@@ -1407,7 +1374,14 @@ impl Judge {
                     else {
                         continue;
                     };
-                    if rebind_official_flick_tracker(&mut self.trackers, id, res.dpi, official_frame_time, touch.position) {
+                    if rebind_official_flick_tracker(
+                        &mut self.trackers,
+                        id,
+                        res.dpi,
+                        official_frame_time,
+                        motion_position(touch.position),
+                        phigros_unit,
+                    ) {
                         official_started.insert(id);
                         if touch_debug_enabled {
                             debug_tracker_rebound_ids.push(id);
@@ -1432,7 +1406,11 @@ impl Judge {
                         continue;
                     };
                     if let Some(tracker) = self.trackers.get_mut(&id) {
-                        tracker.push(official_frame_time, to_phigros_motion_point(touch.position));
+                        tracker.push_with_delta(
+                            official_frame_time,
+                            to_phigros_motion_point(motion_position(touch.position), phigros_unit),
+                            get_frame_time(),
+                        );
                     }
                 }
             }
@@ -1514,482 +1492,377 @@ impl Judge {
         };
         let mut judgements = Vec::new();
         let mut hold_head_effects = Vec::new();
-        // clicks & flicks
-        for (id, touch) in event_touches.iter().enumerate() {
-            let click = touch.phase == TouchPhase::Started;
-            let flick =
-                matches!(touch.phase, TouchPhase::Moved | TouchPhase::Stationary) && self.trackers.get_mut(&touch.id).is_some_and(|it| it.flicked);
-            if !(click || flick) {
-                continue;
+        if other_official {
+            for entry in &mut self.replica.notes {
+                let note = &mut chart.lines[entry.line_id].notes[entry.note_id as usize];
+                note.object.translation.0.set_time(t);
+                entry.x = note.object.translation.0.now() as f64 / phigros_unit;
+                if matches!(note.judge, JudgeStatus::Judged) {
+                    entry.skip();
+                }
             }
-            let event_official = if click { other_official } else { flick_official };
-            let t = event_judgement_time(t, time_of(touch), event_official);
-            if event_official {
-                let mut candidates = Vec::new();
-                for (line_id, ((line, line_pos), (idx, st))) in chart.lines.iter_mut().zip(event_pos.iter()).zip(self.notes.iter_mut()).enumerate() {
-                    let Some(p) = line_pos[id] else {
+            let fingers: Vec<_> = event_touches
+                .iter()
+                .enumerate()
+                .map(|(id, touch)| replica::Finger {
+                    click: touch.phase == TouchPhase::Started,
+                    flick: matches!(touch.phase, TouchPhase::Moved | TouchPhase::Stationary)
+                        && self.trackers.get(&touch.id).is_some_and(|tracker| tracker.flicked),
+                    positions: event_pos
+                        .iter()
+                        .map(|line| line[id].map(|p| [p.x as f64 / phigros_unit, p.y as f64 / phigros_unit]))
+                        .collect(),
+                })
+                .collect();
+            let held_positions: Vec<_> = active_pos
+                .iter()
+                .map(|line| line.iter().map(|p| [p.x as f64 / phigros_unit, p.y as f64 / phigros_unit]).collect())
+                .collect();
+            let result = self.replica.step(replica::Frame {
+                now: t,
+                speed: spd,
+                windows: replica::Windows {
+                    perfect: phigros_windows.perfect,
+                    good: phigros_windows.good,
+                    bad: phigros_windows.bad,
+                    flick: phigros_windows.flick,
+                },
+                fingers: &fingers,
+                held_positions: &held_positions,
+                keyboard_clicks: keys_down,
+                keyboard_held: self.key_down_count != 0,
+            });
+            for id in result.consumed_fingers {
+                if let Some(tracker) = self.trackers.get_mut(&event_touches[id].id) {
+                    tracker.consume();
+                }
+            }
+            for event in result.events {
+                match event {
+                    replica::Event::Head { index, perfect } => {
+                        let entry = &self.replica.notes[index];
+                        chart.lines[entry.line_id].notes[entry.note_id as usize].hitsound.play(res);
+                        Self::commit_hold_head(
+                            &self.judgements,
+                            &self.report_judgements,
+                            t,
+                            entry.line_id as u32,
+                            entry.note_id,
+                            perfect,
+                            (t - entry.time) / spd,
+                        );
+                        hold_head_effects.push((entry.line_id, entry.note_id, perfect));
+                    }
+                    replica::Event::Final { index, outcome, hit_time } => {
+                        let entry = &self.replica.notes[index];
+                        let judgement = match outcome {
+                            replica::Outcome::Perfect => Judgement::Perfect,
+                            replica::Outcome::Good => Judgement::Good,
+                            replica::Outcome::Bad => Judgement::Bad,
+                            replica::Outcome::Miss => Judgement::Miss,
+                        };
+                        judgements.push((judgement, entry.line_id, entry.note_id, hit_time));
+                    }
+                }
+            }
+            for entry in &self.replica.notes {
+                let note = &mut chart.lines[entry.line_id].notes[entry.note_id as usize];
+                note.judge = match entry.visual(t, spd, phigros_windows.good) {
+                    replica::Visual::Waiting => JudgeStatus::NotJudged,
+                    replica::Visual::Armed => JudgeStatus::PreJudge,
+                    replica::Visual::Finished => JudgeStatus::Judged,
+                    replica::Visual::Hold {
+                        perfect,
+                        head_time,
+                        pending,
+                        scored,
+                        safe_frames,
+                    } => {
+                        let at = match note.judge {
+                            JudgeStatus::Hold(_, at, previous_head_time, _, _, _, previous_pending)
+                                if previous_pending == pending && previous_head_time == head_time =>
+                            {
+                                at
+                            }
+                            _ => head_time,
+                        };
+                        JudgeStatus::Hold(perfect, at, head_time, scored, f64::INFINITY, safe_frames, pending)
+                    }
+                };
+            }
+        } else {
+            // clicks & flicks
+            for (id, touch) in event_touches.iter().enumerate() {
+                let click = touch.phase == TouchPhase::Started;
+                let flick = matches!(touch.phase, TouchPhase::Moved | TouchPhase::Stationary)
+                    && self.trackers.get_mut(&touch.id).is_some_and(|it| it.flicked);
+                if !(click || flick) {
+                    continue;
+                }
+                let t = event_judgement_time(t, time_of(touch), false);
+                let mut closest = (None, X_DIFF_MAX, LIMIT_BAD, LIMIT_BAD + (X_DIFF_MAX / NOTE_WIDTH_RATIO_BASE - 1.).max(0.) * DIST_FACTOR);
+                for (line_id, ((line, pos), (idx, st))) in chart.lines.iter_mut().zip(event_pos.iter()).zip(self.notes.iter_mut()).enumerate() {
+                    let Some(pos) = pos[id] else {
                         continue;
                     };
-                    for note_id in &idx[*st..] {
-                        let note = &mut line.notes[*note_id as usize];
-                        if !matches!(note.judge, JudgeStatus::NotJudged) {
+                    for id in &idx[*st..] {
+                        let note = &mut line.notes[*id as usize];
+                        // With mixed selectors, a note owned by the other engine
+                        // must not win this event's Phira candidate search.
+                        // Matching selectors retain the original Phira ordering.
+                        if other_official != flick_official
+                            && (click && matches!(note.kind, NoteKind::Flick) || !click && !matches!(note.kind, NoteKind::Flick))
+                        {
                             continue;
                         }
-                        if (!click && !matches!(note.kind, NoteKind::Flick)) || (click && matches!(note.kind, NoteKind::Flick) && !flick_official) {
+                        if !matches!(note.judge, JudgeStatus::NotJudged | JudgeStatus::PreJudge) {
                             continue;
                         }
-
-                        let d = (note.time - t) / spd;
-                        let broad_early = if click { phigros_windows.bad } else { phigros_windows.flick };
-                        if d > broad_early {
+                        if !click && matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. }) {
+                            continue;
+                        }
+                        let dt = (note.time - t) / spd;
+                        if dt >= closest.3 {
                             break;
                         }
-                        let late_limit = if click { phigros_windows.good } else { phigros_windows.flick };
-                        if d <= -late_limit {
-                            continue;
-                        }
-
+                        let dt = if dt < 0. { (dt + EARLY_OFFSET).min(0.).abs() } else { dt };
                         let x = &mut note.object.translation.0;
                         x.set_time(t);
-                        let dist = (x.now() - p.x).abs() as f64 / note.judge_area as f64;
-                        let x_limit = if click { PHIGROS_TAP_X } else { PHIGROS_DRAG_X };
-                        if dist >= x_limit {
+                        let dist = (x.now() - pos.x).abs() as f64 / note.judge_area as f64;
+                        if dist > X_DIFF_MAX {
                             continue;
                         }
-                        let early_limit = if click {
-                            let units = dist / PHIGROS_X_UNIT;
-                            phigros_windows.bad - 0.5 * phigros_windows.perfect * (units - 0.9).max(0.)
+                        if dt
+                            > if matches!(note.kind, NoteKind::Click) {
+                                LIMIT_BAD - LIMIT_PERFECT * (dist - 0.9).max(0.)
+                            } else {
+                                LIMIT_GOOD
+                            }
+                        {
+                            continue;
+                        }
+                        let dt = if matches!(note.kind, NoteKind::Flick | NoteKind::Drag) {
+                            dt + LIMIT_GOOD
                         } else {
-                            phigros_windows.flick
+                            dt
                         };
-                        if d > early_limit {
-                            continue;
+                        let key = dt + (dist / NOTE_WIDTH_RATIO_BASE - 1.).max(0.) * DIST_FACTOR;
+                        if key < closest.3 {
+                            closest = (Some((line_id, *id)), dist, dt, key);
                         }
-
-                        let spatial = dist / PHIGROS_X_UNIT + (p.y as f64 / PHIGROS_X_UNIT / 2.2).abs();
-                        candidates.push(OfficialClickCandidate {
-                            line_id,
-                            note_id: *note_id,
-                            time: note.time,
-                            spatial,
-                            diff: d,
-                            kind: OfficialClickKind::from_note(&note.kind),
-                        });
                     }
                 }
-
-                let closest = if click {
-                    choose_official_click_candidate(&mut candidates, t)
-                } else {
-                    let mut closest = None;
-                    for candidate in candidates {
-                        let replace = closest.is_none_or(|best: OfficialClickCandidate| {
-                            candidate.time < best.time - PHIGROS_CANDIDATE_EPSILON
-                                || ((candidate.time - best.time).abs() <= PHIGROS_CANDIDATE_EPSILON && candidate.spatial < best.spatial)
-                        });
-                        if replace {
-                            closest = Some(candidate);
-                        }
+                if let (Some((line_id, id)), _, dt, _) = closest {
+                    let line = &mut chart.lines[line_id];
+                    if matches!(line.notes[id as usize].kind, NoteKind::Drag) {
+                        debug!("reject by drag");
+                        continue;
                     }
-                    closest
-                };
-
-                if let Some(OfficialClickCandidate {
-                    line_id, note_id, diff: d, ..
-                }) = closest
-                {
-                    let note = &mut chart.lines[line_id].notes[note_id as usize];
                     if click {
-                        match note.kind {
-                            NoteKind::Click => {
-                                note.judge = if d >= phigros_windows.good {
-                                    // Early Bad is final, but PreJudge keeps the
-                                    // visual note alive until it reaches the line.
-                                    JudgeStatus::PreJudge
-                                } else {
-                                    JudgeStatus::Judged
-                                };
-                                let judgement = if d.abs() < phigros_windows.perfect {
-                                    Judgement::Perfect
-                                } else if d.abs() < phigros_windows.good {
-                                    Judgement::Good
-                                } else {
-                                    Judgement::Bad
-                                };
-                                judgements.push((judgement, line_id, note_id, Some(t)));
-                            }
-                            NoteKind::Hold { .. } => {
-                                let pending = d >= phigros_windows.good;
-                                let perfect = !pending && d.abs() < phigros_windows.perfect;
-                                if !pending {
-                                    note.hitsound.play(res);
-                                    Self::commit_hold_head(&self.judgements, &self.report_judgements, t, line_id as _, note_id, perfect);
-                                    hold_head_effects.push((line_id, note_id, perfect));
+                        // click & hold
+                        let note = &mut line.notes[id as usize];
+                        if matches!(note.kind, NoteKind::Flick) {
+                            continue; // to next loop
+                        }
+                        if dt <= LIMIT_GOOD || matches!(note.kind, NoteKind::Hold { .. }) {
+                            match note.kind {
+                                NoteKind::Click => {
+                                    note.judge = JudgeStatus::Judged;
+                                    judgements.push((if dt <= LIMIT_PERFECT { Judgement::Perfect } else { Judgement::Good }, line_id, id, Some(t)));
                                 }
-                                note.judge = JudgeStatus::Hold(perfect, t, t, false, f64::INFINITY, 2, pending);
-                            }
-                            NoteKind::Drag => {
-                                note.judge = JudgeStatus::PreJudge;
-                            }
-                            NoteKind::Flick => {
-                                // CheckNote lets Flick occupy the touch-start
-                                // candidate but never judges it. CheckFlick is
-                                // still the only path that consumes isNewFlick.
-                            }
-                        }
-                    } else {
-                        note.judge = JudgeStatus::PreJudge;
-                        if let Some(tracker) = self.trackers.get_mut(&touch.id) {
-                            tracker.consume();
-                        }
-                    }
-                }
-                continue;
-            }
-
-            let mut closest = (None, X_DIFF_MAX, LIMIT_BAD, LIMIT_BAD + (X_DIFF_MAX / NOTE_WIDTH_RATIO_BASE - 1.).max(0.) * DIST_FACTOR);
-            for (line_id, ((line, pos), (idx, st))) in chart.lines.iter_mut().zip(event_pos.iter()).zip(self.notes.iter_mut()).enumerate() {
-                let Some(pos) = pos[id] else {
-                    continue;
-                };
-                for id in &idx[*st..] {
-                    let note = &mut line.notes[*id as usize];
-                    // With mixed selectors, a note owned by the other engine
-                    // must not win this event's Phira candidate search.
-                    // Matching selectors retain the original Phira ordering.
-                    if other_official != flick_official
-                        && (click && matches!(note.kind, NoteKind::Flick) || !click && !matches!(note.kind, NoteKind::Flick))
-                    {
-                        continue;
-                    }
-                    if !matches!(note.judge, JudgeStatus::NotJudged | JudgeStatus::PreJudge) {
-                        continue;
-                    }
-                    if !click && matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. }) {
-                        continue;
-                    }
-                    let dt = (note.time - t) / spd;
-                    if dt >= closest.3 {
-                        break;
-                    }
-                    let dt = if dt < 0. { (dt + EARLY_OFFSET).min(0.).abs() } else { dt };
-                    let x = &mut note.object.translation.0;
-                    x.set_time(t);
-                    let dist = (x.now() - pos.x).abs() as f64 / note.judge_area as f64;
-                    if dist > X_DIFF_MAX {
-                        continue;
-                    }
-                    if dt
-                        > if matches!(note.kind, NoteKind::Click) {
-                            LIMIT_BAD - LIMIT_PERFECT * (dist - 0.9).max(0.)
+                                NoteKind::Hold { .. } => {
+                                    note.hitsound.play(res);
+                                    Self::commit_hold_head(
+                                        &self.judgements,
+                                        &self.report_judgements,
+                                        t,
+                                        line_id as _,
+                                        id,
+                                        dt <= LIMIT_PERFECT,
+                                        (t - note.time) / spd,
+                                    );
+                                    hold_head_effects.push((line_id, id, dt <= LIMIT_PERFECT));
+                                    note.judge = JudgeStatus::Hold(dt <= LIMIT_PERFECT, t, t, false, f64::INFINITY, 2, false);
+                                }
+                                _ => unreachable!(),
+                            };
                         } else {
-                            LIMIT_GOOD
+                            // prevent extra judgements
+                            if matches!(note.judge, JudgeStatus::NotJudged) {
+                                // keep the note after bad judgement
+                                line.notes[id as usize].judge = JudgeStatus::PreJudge;
+                                judgements.push((Judgement::Bad, line_id, id, Some(t)));
+                            }
                         }
-                    {
-                        continue;
-                    }
-                    let dt = if matches!(note.kind, NoteKind::Flick | NoteKind::Drag) {
-                        dt + LIMIT_GOOD
                     } else {
-                        dt
-                    };
-                    let key = dt + (dist / NOTE_WIDTH_RATIO_BASE - 1.).max(0.) * DIST_FACTOR;
-                    if key < closest.3 {
-                        closest = (Some((line_id, *id)), dist, dt, key);
+                        // flick
+                        line.notes[id as usize].judge = JudgeStatus::PreJudge;
+                        if let Some(tracker) = self.trackers.get_mut(&touch.id) {
+                            tracker.flicked = false;
+                        }
                     }
                 }
             }
-            if let (Some((line_id, id)), _, dt, _) = closest {
-                let line = &mut chart.lines[line_id];
-                if matches!(line.notes[id as usize].kind, NoteKind::Drag) {
-                    debug!("reject by drag");
-                    continue;
-                }
-                if click {
-                    // click & hold
-                    let note = &mut line.notes[id as usize];
-                    if matches!(note.kind, NoteKind::Flick) {
-                        continue; // to next loop
-                    }
-                    if dt <= LIMIT_GOOD || matches!(note.kind, NoteKind::Hold { .. }) {
+            for _ in 0..keys_down {
+                // find the earliest not judged click / hold note
+                if let Some((line_id, id)) = chart
+                    .lines
+                    .iter()
+                    .zip(self.notes.iter())
+                    .enumerate()
+                    .filter_map(|(line_id, (line, (idx, st)))| {
+                        idx[*st..]
+                            .iter()
+                            .cloned()
+                            .find(|id| {
+                                let note = &line.notes[*id as usize];
+                                matches!(note.judge, JudgeStatus::NotJudged) && matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. })
+                            })
+                            .map(|id| (line_id, id))
+                    })
+                    .min_by_key(|(line_id, id)| chart.lines[*line_id].notes[*id as usize].time.not_nan())
+                {
+                    let note = &mut chart.lines[line_id].notes[id as usize];
+                    let dt = (t - note.time).abs() / spd;
+                    let hit_limit = if matches!(note.kind, NoteKind::Click) { LIMIT_BAD } else { LIMIT_GOOD };
+                    if dt <= hit_limit {
                         match note.kind {
                             NoteKind::Click => {
                                 note.judge = JudgeStatus::Judged;
-                                judgements.push((if dt <= LIMIT_PERFECT { Judgement::Perfect } else { Judgement::Good }, line_id, id, Some(t)));
+                                let perfect_limit = LIMIT_PERFECT;
+                                let good_limit = LIMIT_GOOD;
+                                judgements.push((
+                                    if dt <= perfect_limit {
+                                        Judgement::Perfect
+                                    } else if dt <= good_limit {
+                                        Judgement::Good
+                                    } else {
+                                        Judgement::Bad
+                                    },
+                                    line_id,
+                                    id,
+                                    None,
+                                ));
                             }
                             NoteKind::Hold { .. } => {
+                                let perfect_limit = LIMIT_PERFECT;
                                 note.hitsound.play(res);
-                                Self::commit_hold_head(&self.judgements, &self.report_judgements, t, line_id as _, id, dt <= LIMIT_PERFECT);
-                                hold_head_effects.push((line_id, id, dt <= LIMIT_PERFECT));
-                                note.judge = JudgeStatus::Hold(dt <= LIMIT_PERFECT, t, t, false, f64::INFINITY, 2, false);
+                                Self::commit_hold_head(
+                                    &self.judgements,
+                                    &self.report_judgements,
+                                    t,
+                                    line_id as _,
+                                    id,
+                                    dt <= perfect_limit,
+                                    (t - note.time) / spd,
+                                );
+                                hold_head_effects.push((line_id, id, dt <= perfect_limit));
+                                note.judge = JudgeStatus::Hold(dt <= perfect_limit, t, t, false, f64::INFINITY, 2, false);
                             }
                             _ => unreachable!(),
                         };
-                    } else {
-                        // prevent extra judgements
-                        if matches!(note.judge, JudgeStatus::NotJudged) {
-                            // keep the note after bad judgement
-                            line.notes[id as usize].judge = JudgeStatus::PreJudge;
-                            judgements.push((Judgement::Bad, line_id, id, None));
-                        }
                     }
                 } else {
-                    // flick
-                    line.notes[id as usize].judge = JudgeStatus::PreJudge;
-                    if let Some(tracker) = self.trackers.get_mut(&touch.id) {
-                        tracker.flicked = false;
-                    }
-                }
-            }
-        }
-        for _ in 0..keys_down {
-            // find the earliest not judged click / hold note
-            if let Some((line_id, id)) = chart
-                .lines
-                .iter()
-                .zip(self.notes.iter())
-                .enumerate()
-                .filter_map(|(line_id, (line, (idx, st)))| {
-                    idx[*st..]
-                        .iter()
-                        .cloned()
-                        .find(|id| {
-                            let note = &line.notes[*id as usize];
-                            matches!(note.judge, JudgeStatus::NotJudged) && matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. })
-                        })
-                        .map(|id| (line_id, id))
-                })
-                .min_by_key(|(line_id, id)| chart.lines[*line_id].notes[*id as usize].time.not_nan())
-            {
-                let note = &mut chart.lines[line_id].notes[id as usize];
-                let dt = (t - note.time).abs() / spd;
-                let hit_limit = if other_official {
-                    if matches!(note.kind, NoteKind::Click) {
-                        phigros_windows.bad
-                    } else {
-                        phigros_windows.good
-                    }
-                } else if matches!(note.kind, NoteKind::Click) {
-                    LIMIT_BAD
-                } else {
-                    LIMIT_GOOD
-                };
-                if dt <= hit_limit {
-                    match note.kind {
-                        NoteKind::Click => {
-                            note.judge = JudgeStatus::Judged;
-                            let perfect_limit = if other_official { phigros_windows.perfect } else { LIMIT_PERFECT };
-                            let good_limit = if other_official { phigros_windows.good } else { LIMIT_GOOD };
-                            judgements.push((
-                                if dt <= perfect_limit {
-                                    Judgement::Perfect
-                                } else if dt <= good_limit {
-                                    Judgement::Good
-                                } else {
-                                    Judgement::Bad
-                                },
-                                line_id,
-                                id,
-                                None,
-                            ));
-                        }
-                        NoteKind::Hold { .. } => {
-                            let perfect_limit = if other_official { phigros_windows.perfect } else { LIMIT_PERFECT };
-                            note.hitsound.play(res);
-                            Self::commit_hold_head(&self.judgements, &self.report_judgements, t, line_id as _, id, dt <= perfect_limit);
-                            hold_head_effects.push((line_id, id, dt <= perfect_limit));
-                            note.judge = JudgeStatus::Hold(dt <= perfect_limit, t, t, false, f64::INFINITY, 2, false);
-                        }
-                        _ => unreachable!(),
-                    };
-                }
-            } else {
-                break;
-            }
-        }
-        for (line_id, ((line, pos), (idx, st))) in chart.lines.iter_mut().zip(pos.iter()).zip(self.notes.iter()).enumerate() {
-            line.object.set_time(t);
-            for id in &idx[*st..] {
-                let note = &mut line.notes[*id as usize];
-                if let NoteKind::Hold { end_time, .. } = &note.kind {
-                    if let JudgeStatus::Hold(
-                        perfect,
-                        ref mut at,
-                        ref mut diff,
-                        ref mut pre_judge,
-                        ref mut up_time,
-                        ref mut safe_frame,
-                        ref mut head_pending,
-                    ) = note.judge
-                    {
-                        // Official mode commits a successful Hold inside the
-                        // 220 ms tail window, but the note must remain in its
-                        // visual Hold state until the tail actually reaches the
-                        // judge line.  Once armed, contact is no longer judged.
-                        if other_official && *pre_judge {
-                            continue;
-                        }
-                        let x = &mut note.object.translation.0;
-                        x.set_time(t);
-                        let x = x.now();
-                        let x_limit = if other_official { PHIGROS_TAP_X } else { X_DIFF_MAX };
-                        let finger_present = self.key_down_count != 0
-                            || if other_official {
-                                active_pos[line_id]
-                                    .iter()
-                                    .any(|it| (it.x - x).abs() as f64 / (note.judge_area as f64) < x_limit)
-                            } else {
-                                pos.iter()
-                                    .any(|it| it.is_some_and(|it| (it.x - x).abs() as f64 / (note.judge_area as f64) < x_limit))
-                            };
-                        if other_official && *head_pending {
-                            if !finger_present {
-                                if hold_contact_lost(safe_frame) {
-                                    note.judge = JudgeStatus::Judged;
-                                    judgements.push((Judgement::Miss, line_id, *id, None));
-                                }
-                            } else {
-                                *safe_frame = 2;
-                                if (note.time - t) / spd < phigros_windows.good {
-                                    *head_pending = false;
-                                    *at = t;
-                                    *diff = t;
-                                    note.hitsound.play(res);
-                                    Self::commit_hold_head(&self.judgements, &self.report_judgements, t, line_id as _, *id, false);
-                                    hold_head_effects.push((line_id, *id, false));
-                                }
-                            }
-                            continue;
-                        }
-                        let tail_window = hold_tail_window(&res.config);
-                        if (*end_time - t) / spd <= tail_window {
-                            if other_official {
-                                if arm_hold_visual_tail(pre_judge) {
-                                    let judgement = if perfect { Judgement::Perfect } else { Judgement::Good };
-                                    let diff = *diff;
-                                    judgements.push((judgement, line_id, *id, Some(diff)));
-                                }
-                            } else {
-                                *pre_judge = true;
-                            }
-                            continue;
-                        }
-                        if !finger_present {
-                            if other_official {
-                                if hold_contact_lost(safe_frame) {
-                                    note.judge = JudgeStatus::Judged;
-                                    judgements.push((Judgement::Miss, line_id, *id, None));
-                                }
-                            } else if t > *up_time + UP_TOLERANCE {
-                                note.judge = JudgeStatus::Judged;
-                                judgements.push((Judgement::Miss, line_id, *id, None));
-                            } else if up_time.is_infinite() {
-                                *up_time = t;
-                            }
-                        } else {
-                            *up_time = f64::INFINITY;
-                            *safe_frame = 2;
-                        }
-                        continue;
-                    }
-                }
-                if !matches!(note.judge, JudgeStatus::NotJudged) {
-                    continue;
-                }
-                // process miss
-                let dt = (t - note.time) / spd;
-                let official = note_uses_phigros_judgement(&note.kind, other_official, flick_official);
-                let miss_limit = if official {
-                    match note.kind {
-                        NoteKind::Click | NoteKind::Hold { .. } => phigros_windows.good,
-                        NoteKind::Drag => PHIGROS_DRAG_WINDOW,
-                        NoteKind::Flick => phigros_windows.flick,
-                    }
-                } else {
-                    LIMIT_BAD
-                };
-                if dt > miss_limit {
-                    note.judge = JudgeStatus::Judged;
-                    judgements.push((Judgement::Miss, line_id, *id, None));
-                    continue;
-                }
-                if -dt > if official { phigros_windows.bad } else { LIMIT_BAD } {
                     break;
                 }
-                if official {
-                    if !matches!(note.kind, NoteKind::Drag) || dt.abs() > PHIGROS_DRAG_WINDOW {
+            }
+            for (line_id, ((line, pos), (idx, st))) in chart.lines.iter_mut().zip(pos.iter()).zip(self.notes.iter()).enumerate() {
+                line.object.set_time(t);
+                for id in &idx[*st..] {
+                    let note = &mut line.notes[*id as usize];
+                    if let NoteKind::Hold { end_time, .. } = &note.kind {
+                        if let JudgeStatus::Hold(_, _, _, ref mut pre_judge, ref mut up_time, ref mut safe_frame, _) = note.judge {
+                            let x = &mut note.object.translation.0;
+                            x.set_time(t);
+                            let x = x.now();
+                            let finger_present = self.key_down_count != 0
+                                || pos
+                                    .iter()
+                                    .any(|it| it.is_some_and(|it| (it.x - x).abs() as f64 / (note.judge_area as f64) < X_DIFF_MAX));
+                            if (*end_time - t) / spd <= LIMIT_BAD {
+                                *pre_judge = true;
+                                continue;
+                            }
+                            if !finger_present {
+                                if t > *up_time + UP_TOLERANCE {
+                                    note.judge = JudgeStatus::Judged;
+                                    judgements.push((Judgement::Miss, line_id, *id, None));
+                                } else if up_time.is_infinite() {
+                                    *up_time = t;
+                                }
+                            } else {
+                                *up_time = f64::INFINITY;
+                                *safe_frame = 2;
+                            }
+                            continue;
+                        }
+                    }
+                    if !matches!(note.judge, JudgeStatus::NotJudged) {
                         continue;
                     }
+                    // process miss
+                    let dt = (t - note.time) / spd;
+                    let miss_limit = LIMIT_BAD;
+                    if dt > miss_limit {
+                        note.judge = JudgeStatus::Judged;
+                        judgements.push((Judgement::Miss, line_id, *id, None));
+                        continue;
+                    }
+                    if -dt > LIMIT_BAD {
+                        break;
+                    }
+                    if !matches!(note.kind, NoteKind::Drag) && (self.key_down_count == 0 || !matches!(note.kind, NoteKind::Flick)) {
+                        continue;
+                    }
+                    let dt = dt.abs();
                     let x = &mut note.object.translation.0;
                     x.set_time(t);
                     let x = x.now();
                     if self.key_down_count != 0
-                        || active_pos[line_id]
-                            .iter()
-                            .any(|it| (it.x - x).abs() as f64 / (note.judge_area as f64) < PHIGROS_DRAG_X)
+                        || pos.iter().any(|it| {
+                            it.is_some_and(|it| {
+                                let dx = (it.x - x).abs() as f64 / note.judge_area as f64;
+                                dx <= X_DIFF_MAX && dt <= (LIMIT_BAD - LIMIT_PERFECT * (dx - 0.9).max(0.))
+                            })
+                        })
                     {
                         note.judge = JudgeStatus::PreJudge;
                     }
-                    continue;
-                }
-                if !matches!(note.kind, NoteKind::Drag) && (self.key_down_count == 0 || !matches!(note.kind, NoteKind::Flick)) {
-                    continue;
-                }
-                let dt = dt.abs();
-                let x = &mut note.object.translation.0;
-                x.set_time(t);
-                let x = x.now();
-                if self.key_down_count != 0
-                    || pos.iter().any(|it| {
-                        it.is_some_and(|it| {
-                            let dx = (it.x - x).abs() as f64 / note.judge_area as f64;
-                            dx <= X_DIFF_MAX && dt <= (LIMIT_BAD - LIMIT_PERFECT * (dx - 0.9).max(0.))
-                        })
-                    })
-                {
-                    note.judge = JudgeStatus::PreJudge;
                 }
             }
-        }
-        // process pre-judge
-        for (line_id, (line, (idx, st))) in chart.lines.iter_mut().zip(self.notes.iter()).enumerate() {
-            line.object.set_time(t);
-            for id in &idx[*st..] {
-                let note = &mut line.notes[*id as usize];
-                let official = note_uses_phigros_judgement(&note.kind, other_official, flick_official);
-                if let JudgeStatus::Hold(perfect, .., diff, tail_armed, _, _, _) = note.judge {
-                    if let NoteKind::Hold { end_time, .. } = &note.kind {
-                        if hold_visual_tail_ended(tail_armed, *end_time, t) {
-                            note.judge = JudgeStatus::Judged;
-                            if !official {
+            // process pre-judge
+            for (line_id, (line, (idx, st))) in chart.lines.iter_mut().zip(self.notes.iter()).enumerate() {
+                line.object.set_time(t);
+                for id in &idx[*st..] {
+                    let note = &mut line.notes[*id as usize];
+                    if let JudgeStatus::Hold(perfect, .., diff, tail_armed, _, _, _) = note.judge {
+                        if let NoteKind::Hold { end_time, .. } = &note.kind {
+                            if hold_visual_tail_ended(tail_armed, *end_time, t) {
+                                note.judge = JudgeStatus::Judged;
                                 judgements.push((if perfect { Judgement::Perfect } else { Judgement::Good }, line_id, *id, Some(diff)));
+                                continue;
                             }
-                            continue;
                         }
                     }
-                }
-                // TODO adjust
-                let ghost_t = t + if official { phigros_windows.good } else { LIMIT_GOOD };
-                if matches!(note.kind, NoteKind::Click) {
-                    if ghost_t < note.time {
-                        break;
-                    }
-                } else if official {
-                    if (note.time - t) / spd >= PHIGROS_RESOLVE_EARLY {
+                    // TODO adjust
+                    let ghost_t = t + LIMIT_GOOD;
+                    if matches!(note.kind, NoteKind::Click) {
+                        if ghost_t < note.time {
+                            break;
+                        }
+                    } else if t < note.time {
                         continue;
                     }
-                } else if t < note.time {
-                    continue;
-                }
-                if matches!(note.judge, JudgeStatus::PreJudge) {
-                    let diff = if let JudgeStatus::Hold(.., diff, _, _, _, _) = note.judge {
-                        Some(diff)
-                    } else {
-                        None
-                    };
-                    note.judge = JudgeStatus::Judged;
-                    if !matches!(note.kind, NoteKind::Click) {
-                        judgements.push((Judgement::Perfect, line_id, *id, diff));
+                    if matches!(note.judge, JudgeStatus::PreJudge) {
+                        let diff = if let JudgeStatus::Hold(.., diff, _, _, _, _) = note.judge {
+                            Some(diff)
+                        } else {
+                            None
+                        };
+                        note.judge = JudgeStatus::Judged;
+                        if !matches!(note.kind, NoteKind::Click) {
+                            judgements.push((Judgement::Perfect, line_id, *id, diff));
+                        }
                     }
                 }
             }
@@ -2071,7 +1944,7 @@ impl Judge {
             let mut persistent_snapshot = Vec::with_capacity(pending_snapshot_debug.len());
             for pending in pending_snapshot_debug {
                 let judge_point = pending.touch.position;
-                let phigros_point = to_phigros_motion_point(judge_point);
+                let phigros_point = to_phigros_motion_point(motion_position(judge_point), phigros_unit);
                 let sequence = self.next_touch_debug_sequence();
                 persistent_snapshot.push(TouchDebugSample {
                     sequence,
@@ -2107,7 +1980,7 @@ impl Judge {
                 sequence,
                 frame_index,
                 judge_time_seconds: t,
-                tracker_clock_seconds: t / spd,
+                tracker_clock_seconds: if flick_official { self.official_tracker_clock as f64 } else { t / spd },
                 captured_uptime_seconds: uptime,
                 frame_delta_seconds: get_frame_time() as f64,
                 tap_drag_hold_uses_phigros: other_official,
@@ -2190,7 +2063,7 @@ impl Judge {
                 }
                 note.judge = if matches!(note.kind, NoteKind::Hold { .. }) {
                     note.hitsound.play(res);
-                    Self::commit_hold_head(&self.judgements, &self.report_judgements, t, line_id as _, *id, true);
+                    Self::commit_hold_head(&self.judgements, &self.report_judgements, t, line_id as _, *id, true, 0.);
                     hold_head_effects.push((line_id, *id, true));
                     JudgeStatus::Hold(true, t, (t - note.time) / spd, false, f64::INFINITY, 2, false)
                 } else {
@@ -2326,7 +2199,7 @@ mod replica_input_tests {
         let chart = Chart::new(0., Vec::new(), BpmList::default(), ChartSettings::default(), ChartExtra::default(), HashMap::new());
         let mut judge = Judge::new(&chart);
         judge.commit(1.25, Judgement::Good, 3, 7, -0.0125);
-        Judge::commit_hold_head(&judge.judgements, &judge.report_judgements, 2.5, 4, 8, true);
+        Judge::commit_hold_head(&judge.judgements, &judge.report_judgements, 2.5, 4, 8, true, -0.025);
 
         let events = judge.take_report_judgements();
         assert_eq!(events.len(), 2);
@@ -2336,6 +2209,7 @@ mod replica_input_tests {
         assert_eq!(events[0].judgement, Ok(Judgement::Good));
         assert_eq!(events[0].difference, -0.0125);
         assert_eq!(events[1].judgement, Err(true));
+        assert_eq!(events[1].difference, -0.025);
         assert!(judge.take_report_judgements().is_empty());
         assert_eq!(judge.judgements.borrow().len(), 2);
     }
@@ -2343,7 +2217,7 @@ mod replica_input_tests {
     #[test]
     fn flick_motion_is_converted_to_phigros_units() {
         let point = vec2(PHIGROS_X_UNIT as f32 * 0.31, 0.);
-        let converted = to_phigros_motion_point(point);
+        let converted = to_phigros_motion_point(point, PHIGROS_X_UNIT);
         assert!((converted.x - 0.31).abs() < 1e-6);
     }
 
@@ -2351,13 +2225,13 @@ mod replica_input_tests {
     fn missing_snapshot_clears_unconsumed_flick_on_stationary_frame() {
         let point = vec2(PHIGROS_X_UNIT as f32 * 0.4, 0.);
         let mut tracker = FlickTracker::new(380, 0., Point::new(0., 0.), true);
-        tracker.push(1. / 60., to_phigros_motion_point(point));
+        tracker.push(1. / 60., to_phigros_motion_point(point, PHIGROS_X_UNIT));
         assert!(tracker.flicked);
         let mut touches = HashMap::new();
         let active = HashMap::from([(7, point)]);
         let mut debug = Vec::new();
         complete_finger_snapshots(&mut touches, &active, Some(&mut debug));
-        tracker.push(2. / 60., to_phigros_motion_point(touches[&7].position));
+        tracker.push(2. / 60., to_phigros_motion_point(touches[&7].position, PHIGROS_X_UNIT));
         assert!(!tracker.flicked);
         assert!(tracker.stopped);
         assert_eq!(debug, vec![7]);
@@ -2367,11 +2241,11 @@ mod replica_input_tests {
     fn missing_snapshot_rearms_consumed_flick_before_next_swipe() {
         let point = vec2(PHIGROS_X_UNIT as f32 * 0.4, 0.);
         let mut tracker = FlickTracker::new(380, 0., Point::new(0., 0.), true);
-        tracker.push(1. / 60., to_phigros_motion_point(point));
+        tracker.push(1. / 60., to_phigros_motion_point(point, PHIGROS_X_UNIT));
         tracker.consume();
         let mut touches = HashMap::new();
         complete_finger_snapshots(&mut touches, &HashMap::from([(7, point)]), None);
-        tracker.push(2. / 60., to_phigros_motion_point(touches[&7].position));
+        tracker.push(2. / 60., to_phigros_motion_point(touches[&7].position, PHIGROS_X_UNIT));
         tracker.push(3. / 60., Point::new(1.2, 0.));
         assert!(tracker.flicked);
     }
@@ -2408,6 +2282,44 @@ mod replica_input_tests {
         assert!(hit.flicked);
         hit.consume();
         assert!(!hit.flicked);
+    }
+
+    #[test]
+    fn low_dpi_small_displacement_retriggers_after_previous_fast_projection() {
+        let mut tracker = FlickTracker::new(200, 0., Point::new(0., 0.), true);
+        tracker.push(1. / 120., Point::new(0.2, 0.));
+        tracker.consume();
+        tracker.push(2. / 120., Point::new(0.29, 0.));
+        assert!(tracker.previous_flick_speed > tracker.threshold);
+        tracker.consume();
+        tracker.push(3. / 120., Point::new(0.38, 0.));
+        assert_eq!(tracker.previous_flick_speed, 0.);
+        assert!(tracker.flicked);
+    }
+
+    #[test]
+    fn official_flick_uses_frame_delta_even_if_clock_jumps() {
+        let mut tracker = FlickTracker::new(380, 600., Point::new(0., 0.), true);
+        tracker.push_with_delta(5000., Point::new(0.31, 0.), 1. / 60.);
+        assert!(tracker.flicked);
+        tracker.consume();
+        tracker.push_with_delta(2., Point::new(0.62, 0.), 1. / 60.);
+        assert!(!tracker.flicked);
+        assert!((tracker.previous_flick_speed - 0.31).abs() < 1e-6);
+    }
+
+    #[test]
+    fn replica_range_profile_uses_screen_height_without_changing_phira_ranges() {
+        let chart = Chart::new(0., Vec::new(), BpmList::default(), ChartSettings::default(), ChartExtra::default(), HashMap::new());
+        let mut judge = Judge::new(&chart);
+        judge.replica_world_unit = replica::world_unit(1080., 2400.);
+        let mut config = Config::default();
+        config.judgement_mode = JudgementMode::PhigrosReplica;
+        let profile = judge.judgement_range_profile(&config);
+        assert!((profile.tap_x * 2400. / 2. - 1080. * 0.19).abs() < 1e-9);
+        assert!((profile.flick_x * 2400. / 2. - 1080. * 0.21).abs() < 1e-9);
+        config.judgement_mode = JudgementMode::Phira;
+        assert_eq!(judge.judgement_range_profile(&config).tap_x, PHIRA_X_MAX);
     }
 
     #[test]
@@ -2485,11 +2397,11 @@ mod replica_input_tests {
     fn orphan_move_rebind_starts_from_zero_velocity() {
         let mut trackers = HashMap::new();
         let position = vec2(0.75 * PHIGROS_X_UNIT as f32, -0.25 * PHIGROS_X_UNIT as f32);
-        assert!(rebind_official_flick_tracker(&mut trackers, 4, 380, 1., position));
-        assert!(!rebind_official_flick_tracker(&mut trackers, 4, 380, 2., vec2(9., 9.)));
+        assert!(rebind_official_flick_tracker(&mut trackers, 4, 380, 1., position, PHIGROS_X_UNIT));
+        assert!(!rebind_official_flick_tracker(&mut trackers, 4, 380, 2., vec2(9., 9.), PHIGROS_X_UNIT));
 
         let tracker = trackers.get_mut(&4).unwrap();
-        tracker.push(1. + 1. / 60., to_phigros_motion_point(position));
+        tracker.push(1. + 1. / 60., to_phigros_motion_point(position, PHIGROS_X_UNIT));
         assert!(!tracker.flicked);
         assert!(tracker.stopped);
     }
@@ -2510,87 +2422,13 @@ mod replica_input_tests {
     }
 
     #[test]
-    fn official_touch_start_candidate_matches_phigros_type_priority() {
-        fn candidate(time: f64, spatial: f64, kind: OfficialClickKind) -> OfficialClickCandidate {
-            OfficialClickCandidate {
-                line_id: 0,
-                note_id: 0,
-                time,
-                spatial,
-                diff: time - 1.,
-                kind,
-            }
-        }
-
-        let mut weak_then_tap = [
-            candidate(0.990, 0.1, OfficialClickKind::Drag),
-            candidate(1.000, 9., OfficialClickKind::Tap),
-        ];
-        assert_eq!(choose_official_click_candidate(&mut weak_then_tap, 1.).unwrap().kind, OfficialClickKind::Tap);
-
-        let mut tap_then_weak = [
-            candidate(0.990, 9., OfficialClickKind::Tap),
-            candidate(1.000, 0.1, OfficialClickKind::Flick),
-        ];
-        assert_eq!(choose_official_click_candidate(&mut tap_then_weak, 1.).unwrap().kind, OfficialClickKind::Tap);
-
-        let mut tap_tie = [
-            candidate(0.990, 9., OfficialClickKind::Tap),
-            candidate(0.995, 0.1, OfficialClickKind::Hold),
-        ];
-        assert_eq!(choose_official_click_candidate(&mut tap_tie, 1.).unwrap().kind, OfficialClickKind::Hold);
-
-        let mut weak_notes = [
-            candidate(0.900, 0.1, OfficialClickKind::Drag),
-            candidate(0.950, 0.1, OfficialClickKind::Flick),
-        ];
-        assert_eq!(choose_official_click_candidate(&mut weak_notes, 1.).unwrap().kind, OfficialClickKind::Flick);
-    }
-
-    #[test]
-    fn hold_safe_frame_rule_is_unchanged() {
-        let mut safe_frame = 2;
-        assert!(!hold_contact_lost(&mut safe_frame));
-        assert_eq!(safe_frame, 1);
-        assert!(!hold_contact_lost(&mut safe_frame));
-        assert_eq!(safe_frame, 0);
-        assert!(!hold_contact_lost(&mut safe_frame));
-        assert_eq!(safe_frame, -1);
-        assert!(hold_contact_lost(&mut safe_frame));
-    }
-
-    #[test]
     fn completed_hold_keeps_its_visual_tail_until_end_time() {
-        let mut tail_armed = false;
-        assert!(arm_hold_visual_tail(&mut tail_armed));
-        assert!(tail_armed);
-        assert!(!arm_hold_visual_tail(&mut tail_armed));
+        let tail_armed = true;
 
         let end_time = 10.;
         assert!(!hold_visual_tail_ended(tail_armed, end_time, end_time - PHIGROS_HOLD_TAIL));
         assert!(!hold_visual_tail_ended(tail_armed, end_time, end_time - 1e-9));
         assert!(hold_visual_tail_ended(tail_armed, end_time, end_time));
-    }
-
-    #[test]
-    fn split_modes_route_only_flick_to_the_flick_selector() {
-        let click = NoteKind::Click;
-        let drag = NoteKind::Drag;
-        let hold = NoteKind::Hold {
-            end_time: 1.,
-            end_height: 1.,
-        };
-        let flick = NoteKind::Flick;
-
-        assert!(!note_uses_phigros_judgement(&click, false, true));
-        assert!(!note_uses_phigros_judgement(&drag, false, true));
-        assert!(!note_uses_phigros_judgement(&hold, false, true));
-        assert!(note_uses_phigros_judgement(&flick, false, true));
-
-        assert!(note_uses_phigros_judgement(&click, true, false));
-        assert!(note_uses_phigros_judgement(&drag, true, false));
-        assert!(note_uses_phigros_judgement(&hold, true, false));
-        assert!(!note_uses_phigros_judgement(&flick, true, false));
     }
 
     #[test]

@@ -22,6 +22,7 @@ from dex_density_dpi import patch_density_dpi, verify_density_dpi
 
 
 VIDEO_MARKER = b"PHIRA_REPLICA_VIDEO_ENABLED_FFMPEG_V1\0"
+PRACTICE_LAYOUT_MARKER = b"PHIRAIAD_PRACTICE_LAYOUT_70_SHIFT10_BN_ROWS_V2\0"
 PACKAGE_NAME = "org.flos.phira.replica"
 CERT_SHA256 = "a59eb8345a617d28e3b2032849aa043d1b00fcbc2545a436fdc15c57bab29936"
 DEFAULT_APP_LABEL = "PhiraiAd"
@@ -292,6 +293,26 @@ def patch_manifest(data, old_name, new_name, version_code, app_label):
     return patch_manifest_label(bytes(data), app_label)
 
 
+def prepare_font_replacements(base_apk: Path) -> dict[str, bytes]:
+    """Always replace inherited fonts with the checked-in official Phira fonts."""
+    font_dir = Path(__file__).resolve().parents[1] / "assets"
+    replacements = {f"assets/{name}": (font_dir / name).read_bytes()
+                    for name in ("font.ttf", "bold.ttf", "phigros.ttf")}
+    with zipfile.ZipFile(base_apk) as base:
+        missing = set(replacements) - set(base.namelist())
+        if missing:
+            raise ValueError(f"Base APK is missing font assets: {sorted(missing)}")
+    return replacements
+
+
+def verify_native_build_markers(lib: bytes):
+    if VIDEO_MARKER not in lib:
+        raise ValueError("Native library has no video build marker; rebuild with --features video")
+    if PRACTICE_LAYOUT_MARKER not in lib:
+        raise ValueError("Native library is missing the updated practice layout / Bn marker; "
+                         "rebuild phira and use the new libphira.so instead of an older build")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("base-apk", "native-lib", "cxx-lib", "build-tools", "keystore", "out"):
@@ -316,13 +337,14 @@ def main():
     lib, cxx = args.native_lib.read_bytes(), args.cxx_lib.read_bytes()
     check_arm64(lib)
     check_arm64(cxx)
-    if VIDEO_MARKER not in lib:
-        raise ValueError("Native library has no video build marker; rebuild with --features video")
+    verify_native_build_markers(lib)
     aapt, align, signer = [args.build_tools / n for n in ("aapt", "zipalign", "apksigner")]
     before = run([aapt, "dump", "badging", args.base_apk])
     if f"name='{PACKAGE_NAME}'" not in before.splitlines()[0]:
         raise ValueError("The Android shell must belong to Phira Replica")
     icon_replacements = {} if args.keep_base_icon else prepare_icon_replacements(args.base_apk, args.icon, before)
+    font_replacements = prepare_font_replacements(args.base_apk)
+    asset_replacements = {**icon_replacements, **font_replacements}
     old_name = re.search(r"versionName='([^']+)'", before).group(1)
     old_code = int(re.search(r"versionCode='(\d+)'", before).group(1))
     if args.version_code <= old_code:
@@ -341,8 +363,8 @@ def main():
                 if name.startswith("META-INF/"):
                     continue
                 content = src.read(info)
-                if name in icon_replacements:
-                    content = icon_replacements[name]
+                if name in asset_replacements:
+                    content = asset_replacements[name]
                 elif name == "AndroidManifest.xml":
                     content = patch_manifest(content, old_name, args.version_name, args.version_code, args.app_label)
                 elif name == "classes.dex":
@@ -379,9 +401,9 @@ def main():
         with zipfile.ZipFile(signed) as z:
             if z.testzip() is not None:
                 raise ValueError("Final APK ZIP CRC verification failed")
-            for name, expected in icon_replacements.items():
+            for name, expected in asset_replacements.items():
                 if z.read(name) != expected:
-                    raise ValueError(f"Final APK icon validation failed: {name}")
+                    raise ValueError(f"Final APK asset validation failed: {name}")
             verify_density_dpi(z.read("classes.dex"))
             if z.read("lib/arm64-v8a/libphira.so") != lib:
                 raise ValueError("Final APK does not contain the intended native library")
@@ -396,7 +418,7 @@ def main():
                     raise ValueError("Final APK added or lost a non-signature file")
                 expected_changes = {"AndroidManifest.xml", "lib/arm64-v8a/libphira.so",
                                     "lib/arm64-v8a/libc++_shared.so", "classes.dex"}
-                expected_changes.update(icon_replacements)
+                expected_changes.update(asset_replacements)
                 if z.read("classes.dex") != patch_density_dpi(original.read("classes.dex")):
                     raise ValueError("Unexpected DEX changes")
                 if any(original.read(n) != z.read(n) for n in names - expected_changes):
@@ -405,10 +427,11 @@ def main():
 
     report = {"file": args.out.name, "sizeBytes": args.out.stat().st_size,
               "sha256": hashlib.sha256(args.out.read_bytes()).hexdigest(),
-              "videoBuildMarker": True, "certificateSha256": CERT_SHA256,
+              "videoBuildMarker": True, "practiceLayoutRevision": "70_SHIFT10_BN_ROWS_V2", "certificateSha256": CERT_SHA256,
               "package": badging.splitlines()[0], "signatureVerification": verification,
               "alignmentVerified": True, "androidDpiSource": "DisplayMetrics.densityDpi",
               "appLabel": args.app_label, "deviceInstallationTested": False,
+              "fontSha256": {n: hashlib.sha256(data).hexdigest() for n, data in font_replacements.items()},
               "iconResources": sorted(icon_replacements),
               "iconSha256": hashlib.sha256(next(iter(icon_replacements.values()))).hexdigest() if icon_replacements else None}
     report_path = args.out.with_suffix(".verification.json")

@@ -24,6 +24,12 @@ use uuid::Uuid;
 const MAX_IMPORT_RETRIES: u8 = 2;
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct SavedChallengeChart {
+    pub info: BriefChartInfo,
+    pub local_path: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BriefChartInfo {
     pub id: Option<i32>,
@@ -107,6 +113,8 @@ pub struct Data {
     pub local_records: HashMap<String, Option<SimpleRecord>>,
     /// Personal online-chart bests, separate from ordinary/cloud-synchronized records.
     pub replica_local_records: HashMap<i32, SimpleRecord>,
+    pub challenge_selection: [Option<SavedChallengeChart>; 3],
+    pub challenge_badges: crate::challenge::ChallengeSlots,
     pub config: Config,
     pub message_check_time: Option<DateTime<Utc>>,
     pub language: Option<String>,

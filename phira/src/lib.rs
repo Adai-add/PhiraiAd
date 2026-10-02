@@ -19,6 +19,13 @@ mod censor;
 mod chart_play_settings;
 mod charts_view;
 mod client;
+/// Packaging rejects old native libraries lacking this layout revision.
+#[used]
+#[no_mangle]
+pub static PHIRAIAD_PRACTICE_LAYOUT_REVISION: [u8; 47] = *b"PHIRAIAD_PRACTICE_LAYOUT_70_SHIFT10_BN_ROWS_V2\0";
+
+pub mod challenge;
+mod challenge_ui;
 pub mod custom_rks;
 mod data;
 pub mod deeplink;

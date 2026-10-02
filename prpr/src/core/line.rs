@@ -404,10 +404,10 @@ impl JudgeLine {
             }
             let (vw, vh) = (1.1, 1.);
             let p = [
-                res.screen_to_world(Point::new(-vw, -vh)),
-                res.screen_to_world(Point::new(-vw, vh)),
-                res.screen_to_world(Point::new(vw, -vh)),
-                res.screen_to_world(Point::new(vw, vh)),
+                res.screen_to_world(res.chart_view_point(Point::new(-vw, -vh), true)),
+                res.screen_to_world(res.chart_view_point(Point::new(-vw, vh), true)),
+                res.screen_to_world(res.chart_view_point(Point::new(vw, -vh), true)),
+                res.screen_to_world(res.chart_view_point(Point::new(vw, vh), true)),
             ];
             let height_above = p[0].y.max(p[1].y.max(p[2].y.max(p[3].y))) * res.aspect_ratio;
             let height_below = -p[0].y.min(p[1].y.min(p[2].y.min(p[3].y))) * res.aspect_ratio;

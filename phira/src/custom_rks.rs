@@ -239,6 +239,172 @@ pub fn calculate(settings: &Settings, locals: &[LocalInput]) -> (HashMap<String,
     (map, summary)
 }
 
+/// The two independent RKS groups, ordered AP first and Best second.
+#[derive(Clone, Debug)]
+pub struct RankedEntry {
+    pub path: Option<String>,
+    pub name: String,
+    pub difficulty: f64,
+    pub accuracy: f64,
+    pub rks: f64,
+    pub contribution: f64,
+    pub ap: bool,
+    pub ap_group: bool,
+    key: String,
+}
+
+pub fn ranked_entries(settings: &Settings, locals: &[LocalInput]) -> Vec<RankedEntry> {
+    let mut candidates = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for input in locals {
+        if !seen.insert(&input.path) {
+            continue;
+        }
+        let r = resolve(input, &settings.chart(&input.path));
+        if r.included {
+            if let Some((difficulty, accuracy)) = r.difficulty.zip(r.accuracy) {
+                candidates.push(RankedEntry {
+                    path: Some(input.path.clone()),
+                    name: input.name.clone(),
+                    difficulty,
+                    accuracy,
+                    rks: single_rks(difficulty, accuracy),
+                    contribution: 0.,
+                    ap: accuracy == 100.,
+                    ap_group: false,
+                    key: format!("local:{}", input.path),
+                });
+            }
+        }
+    }
+    for extra in &settings.extras {
+        if extra.included {
+            if let Some((difficulty, accuracy)) = difficulty_value(extra.difficulty).zip(accuracy_value(extra.accuracy)) {
+                candidates.push(RankedEntry {
+                    path: None,
+                    name: extra.name.clone(),
+                    difficulty,
+                    accuracy,
+                    rks: single_rks(difficulty, accuracy),
+                    contribution: 0.,
+                    ap: accuracy == 100.,
+                    ap_group: false,
+                    key: format!("extra:{}", extra.id),
+                });
+            }
+        }
+    }
+    candidates.sort_by(|a, b| b.rks.total_cmp(&a.rks).then_with(|| a.key.cmp(&b.key)));
+    let mut entries: Vec<_> = candidates
+        .iter()
+        .filter(|entry| entry.ap)
+        .take(settings.ap_count)
+        .cloned()
+        .map(|mut entry| {
+            entry.ap_group = true;
+            entry
+        })
+        .collect();
+    entries.extend(candidates.into_iter().take(settings.best_count));
+    let divisor = settings.best_count.saturating_add(settings.ap_count) as f64;
+    for entry in &mut entries {
+        entry.contribution = if divisor > 0. { entry.rks / divisor } else { 0. };
+    }
+    entries
+}
+
+#[cfg(test)]
+mod board_tests {
+    use super::*;
+    fn input(path: &str, difficulty: f64, accuracy: f64) -> LocalInput {
+        LocalInput {
+            path: path.into(),
+            name: path.into(),
+            level: "IN".into(),
+            difficulty,
+            ai_difficulty: None,
+            accuracy: Some(accuracy),
+        }
+    }
+    #[test]
+    fn ap_first_independent_best_and_missing_slots() {
+        let settings = Settings {
+            best_count: 4,
+            ap_count: 2,
+            ..Default::default()
+        };
+        let locals = vec![input("normal", 17., 99.), input("ap", 16., 100.)];
+        let entries = ranked_entries(&settings, &locals);
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].ap_group);
+        assert_eq!(entries[0].path.as_deref(), Some("ap"));
+        assert_eq!(entries[1].path.as_deref(), Some("normal"));
+        assert!(!entries[1].ap_group);
+        assert_eq!(entries[2].path.as_deref(), Some("ap"));
+        let sum: f64 = entries.iter().map(|entry| entry.rks).sum();
+        assert!((sum / 6. - calculate(&settings, &locals).1.rks).abs() < 1e-10);
+        assert!((entries.iter().map(|entry| entry.contribution).sum::<f64>() - calculate(&settings, &locals).1.rks).abs() < 1e-10);
+    }
+    #[test]
+    fn exclusions_overrides_extras_and_deterministic_ties() {
+        let mut settings = Settings {
+            best_count: 4,
+            ap_count: 2,
+            ..Default::default()
+        };
+        settings.charts.insert(
+            "excluded".into(),
+            ChartSettings {
+                included: false,
+                ..Default::default()
+            },
+        );
+        settings.charts.insert(
+            "custom".into(),
+            ChartSettings {
+                difficulty_source: DifficultySource::Custom,
+                custom_difficulty: Some(20.),
+                accuracy_source: AccuracySource::Custom,
+                custom_accuracy: Some(100.),
+                ..Default::default()
+            },
+        );
+        settings.extras.push(ExtraEntry {
+            id: 1,
+            name: "Extra".into(),
+            difficulty: 18.,
+            accuracy: 100.,
+            included: true,
+        });
+        let locals = vec![
+            input("excluded", 25., 100.),
+            input("custom", 10., 70.),
+            input("a", 16., 99.999999),
+            input("b", 16., 99.999999),
+        ];
+        let entries = ranked_entries(&settings, &locals);
+        assert_eq!(entries.len(), 6);
+        assert_eq!(entries[0].difficulty, 20.);
+        assert_eq!(entries[1].path, None);
+        assert!(entries.iter().all(|entry| entry.path.as_deref() != Some("excluded")));
+        assert!(!entries[4].ap);
+        assert_eq!(entries[4].path.as_deref(), Some("a"));
+        let mut reversed = locals.clone();
+        reversed.reverse();
+        assert_eq!(
+            entries.iter().map(|e| &e.key).collect::<Vec<_>>(),
+            ranked_entries(&settings, &reversed).iter().map(|e| &e.key).collect::<Vec<_>>()
+        );
+    }
+    #[test]
+    fn empty_and_duplicate_paths_do_not_fill_slots() {
+        let settings = Settings::default();
+        assert!(ranked_entries(&settings, &[]).is_empty());
+        let local = input("a", 15., 99.);
+        assert_eq!(ranked_entries(&settings, &[local.clone(), local]).len(), 1);
+    }
+}
+
 /// Compare available real-record sources before display rounding; custom overrides remain independent.
 pub fn highest_record_accuracy(ordinary_or_cloud: Option<f64>, personal_local: Option<f64>) -> Option<f64> {
     ordinary_or_cloud

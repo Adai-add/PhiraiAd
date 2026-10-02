@@ -1,7 +1,7 @@
 //! Real slider, button and touch-consumption code with recording graphics/input adapters.
 #![allow(dead_code)]
 use std::{cell::RefCell,collections::HashMap,ops::Range};
-use phira_chart_play_tests::practice_speed;
+use phira_chart_play_tests::{practice_speed,practice_view};
 thread_local! {
     static STATE:RefCell<HashMap<String,Option<u64>>>=RefCell::new(HashMap::new());
     static REQUEST:RefCell<Option<(String,String)>>=const{RefCell::new(None)};
@@ -115,4 +115,30 @@ fn unrelated_finger_release_does_not_end_drag_and_scene_cleanup_does(){
     Ui::clear_practice_speed_drag();
     STATE.with(|s|assert!(!s.borrow().contains_key("exercise_speed:drag")));
     frame(&mut value,"exercise_speed",0.46,0.115,TouchPhase::Moved);assert_eq!(value,1.);
+}
+
+#[test]
+fn view_slider_uses_percentage_midpoint_and_preserves_outside_manual_value() {
+    let mut value = 800.;
+    let mut ui = Ui::default();
+    ui.practice_value_slider("exercise_view_scale", "Size", practice_view::SCALE, &mut value, Some(0.4));
+    assert_eq!(value, 800.);
+    assert_eq!(ui.circles[0].0, 0.4);
+    assert!(ui.texts.iter().any(|s| s == "800%"));
+    ui.touches = Some(vec![Touch { id: 9, position: Vec2 { x: 0.2, y: 0.115 }, phase: TouchPhase::Started }]);
+    ui.practice_value_slider("exercise_view_scale", "Size", practice_view::SCALE, &mut value, Some(0.4));
+    assert_eq!(value, 100.);
+    Ui::clear_practice_speed_drag();
+    STATE.with(|s| assert!(!s.borrow().contains_key("exercise_view_scale:drag")));
+}
+
+#[test]
+fn coordinate_slider_endpoints_and_center() {
+    for (i, (p, expected)) in [(0., -2000.), (0.5, 0.), (1., 2000.)].into_iter().enumerate() {
+        let mut value = 0.;
+        let mut ui = Ui { touches: Some(vec![Touch { id: i as u64, position: Vec2 { x: 0.4 * p, y: 0.115 }, phase: TouchPhase::Started }]), ..Default::default() };
+        ui.practice_value_slider("exercise_view_x", "X", practice_view::CENTER, &mut value, Some(0.4));
+        assert_eq!(value, expected);
+        Ui::clear_practice_speed_drag();
+    }
 }

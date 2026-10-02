@@ -1,8 +1,9 @@
 use phira_chart_play_tests::config::{Config, Mods};
+use phira_chart_play_tests::{chart_play, info::ChartInfo};
 use serde::{Deserialize, Serialize};
 include!(concat!(env!("OUT_DIR"), "/record_gate.rs"));
 
-struct Resource { config: Config }
+struct Resource { config: Config, info: ChartInfo }
 struct ResultData { score: i32, accuracy: f32, max_combo: i32, num_of_notes: i32 }
 struct Judge;
 impl Judge {
@@ -21,7 +22,7 @@ fn actual_settlement_gate_saves_manual_runs_but_excludes_other_modes() {
     ] {
         let mut config = Config::default();
         config.shorten_holds = true;
-        let mut scene = Scene { res: Resource { config }, mode, judge: Judge };
+        let mut scene = Scene { res: Resource { config, info: ChartInfo::default() }, mode, judge: Judge };
         assert_eq!(scene.record().is_some(), expected);
         scene.res.config.mods.insert(Mods::AUTOPLAY);
         assert!(scene.record().is_none());
@@ -32,7 +33,7 @@ fn actual_settlement_gate_saves_manual_runs_but_excludes_other_modes() {
 fn generated_record_roundtrips_and_preserves_independent_bests() {
     let mut config = Config::default();
     config.shorten_holds = true;
-    let scene = Scene { res: Resource { config }, mode: GameMode::Normal, judge: Judge };
+    let scene = Scene { res: Resource { config, info: ChartInfo::default() }, mode: GameMode::Normal, judge: Judge };
     let record = scene.record().expect("local manual settlement must produce a record");
     let file = tempfile::NamedTempFile::new().unwrap();
     serde_json::to_writer(file.as_file(), &record).unwrap();

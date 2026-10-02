@@ -112,6 +112,8 @@ pub struct ChartsView {
 
     pub multi_select: Option<Vec<ChartRef>>,
     pub rks_editing: bool,
+    pub challenge_selecting: bool,
+    pub challenge_selected: Option<ChartItem>,
     pub rks_values: Option<Arc<std::collections::HashMap<String, crate::custom_rks::Resolved>>>,
     pub rks_action: Option<crate::page::rks::RksAction>,
 }
@@ -149,6 +151,8 @@ impl ChartsView {
 
             multi_select: None,
             rks_editing: false,
+            challenge_selecting: false,
+            challenge_selected: None,
             rks_values: None,
             rks_action: None,
         }
@@ -252,6 +256,20 @@ impl ChartsView {
                             return Ok(true);
                         }
                         item.long_touch.reset();
+                        if self.challenge_selecting {
+                            let mut chart = chart.clone();
+                            if chart.local_path.is_none() {
+                                if let Some(id) = chart.info.id {
+                                    let path = format!("download/{id}");
+                                    if Path::new(&format!("{}/{path}", dir::charts()?)).exists() {
+                                        chart.local_path = Some(path);
+                                    }
+                                }
+                            }
+                            self.challenge_selected = Some(chart);
+                            button_hit();
+                            return Ok(true);
+                        }
                         let handled_by_mp = MP_PANEL.with(|it| {
                             if let Some(panel) = it.borrow_mut().as_mut() {
                                 if panel.in_room() {
@@ -339,7 +357,11 @@ impl ChartsView {
                         });
                         return Ok(true);
                     }
-                    if !self.rks_editing && self.multi_select.is_none() && item.btn.long_touch(touch, t, &mut item.long_touch) {
+                    if !self.challenge_selecting
+                        && !self.rks_editing
+                        && self.multi_select.is_none()
+                        && item.btn.long_touch(touch, t, &mut item.long_touch)
+                    {
                         self.scroll.y_scroller.halt();
                         self.editing_chart = Some(id);
                         let mut options = vec![tl!("select").into_owned()];

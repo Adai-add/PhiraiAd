@@ -96,6 +96,12 @@ impl RksPanel {
                 .map(|(p, _)| p.clone()),
         );
     }
+    pub fn best_board_count(&self) -> usize {
+        self.summary.best_used + self.summary.ap_used
+    }
+    pub fn best_board(&self) -> (Vec<RankedEntry>, f64) {
+        (ranked_entries(&self.settings, &self.locals), self.summary.rks)
+    }
     pub fn local_editing(&self) -> bool {
         self.editing && self.tab == Tab::Local
     }

@@ -12,6 +12,7 @@ pub use event::EventScene;
 mod main;
 pub use main::{MainScene, BGM_VOLUME_UPDATED, MP_PANEL};
 
+pub mod challenge;
 mod song;
 pub use song::{compress_folder, Downloading, SongScene, RECORD_ID};
 #[cfg(feature = "video")]

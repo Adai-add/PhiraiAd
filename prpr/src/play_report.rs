@@ -1219,7 +1219,7 @@ mod tests {
     #[test]
     fn phira_default_upload_reasons_remain_empty() {
         let config = Config::default();
-        assert!(config.auto_export_play_report);
+        assert!(!config.auto_export_play_report);
         assert!(upload_ineligible_reasons(&config, ReportGameMode::Normal, false).is_empty());
     }
 

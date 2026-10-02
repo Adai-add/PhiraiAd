@@ -11,12 +11,16 @@ pub mod judge;
 pub mod judgement_range;
 pub mod parse;
 pub mod particle;
+mod phigros_judge;
 pub mod play_report;
 pub mod practice_audio;
 pub mod practice_speed;
+pub mod practice_view;
 pub mod scene;
 pub mod task;
 pub mod time;
+pub mod timing_bar;
+pub mod timing_preview;
 pub mod ui;
 
 #[cfg(feature = "log")]

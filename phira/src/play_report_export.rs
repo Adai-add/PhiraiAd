@@ -27,7 +27,7 @@ fn export_report(report: &PlayReport) -> Result<String> {
 
     #[cfg(target_os = "android")]
     {
-        match export_android_downloads(&filename, &bytes) {
+        match export_android_downloads(&filename, &bytes, "application/json", "Download/Phira-Reports") {
             Ok(path) => return Ok(path),
             Err(err) => warn!(?err, "failed to export play report through Android MediaStore; using app storage"),
         }
@@ -72,7 +72,7 @@ fn unique_path(directory: &Path, filename: &str) -> PathBuf {
 }
 
 #[cfg(target_os = "android")]
-fn export_android_downloads(filename: &str, bytes: &[u8]) -> Result<String> {
+pub(crate) fn export_android_downloads(filename: &str, bytes: &[u8], mime_type: &str, relative_path: &str) -> Result<String> {
     use jni::sys::{jclass, jint, jobject, jstring, JNIEnv};
     use std::{ffi::CString, os::fd::FromRawFd};
 
@@ -149,7 +149,7 @@ fn export_android_downloads(filename: &str, bytes: &[u8]) -> Result<String> {
     };
     anyhow::ensure!(sdk >= 29, "public automatic report export requires Android 10 or newer");
 
-    let fd = unsafe {
+    let (fd, resolver, uri) = unsafe {
         let context = ndk_context::android_context().context() as jobject;
         let context_class = ((**env).v1_6.GetObjectClass)(env, context);
         let get_resolver = method(env, context_class, "getContentResolver", "()Landroid/content/ContentResolver;")?;
@@ -161,10 +161,11 @@ fn export_android_downloads(filename: &str, bytes: &[u8]) -> Result<String> {
         let values = ((**env).v1_6.NewObject)(env, values_class, constructor);
         anyhow::ensure!(!values.is_null(), "failed to create Android ContentValues");
         put_string(env, values, values_class, "_display_name", filename)?;
-        put_string(env, values, values_class, "mime_type", "application/json")?;
-        put_string(env, values, values_class, "relative_path", "Download/Phira-Reports")?;
+        put_string(env, values, values_class, "mime_type", mime_type)?;
+        put_string(env, values, values_class, "relative_path", relative_path)?;
+        if mime_type.starts_with("image/") { put_string(env, values, values_class, "is_pending", "1")?; }
 
-        let downloads_class = find_class(env, "android/provider/MediaStore$Downloads")?;
+        let downloads_class = find_class(env, if mime_type.starts_with("image/") { "android/provider/MediaStore$Images$Media" } else { "android/provider/MediaStore$Downloads" })?;
         let field_name = CString::new("EXTERNAL_CONTENT_URI")?;
         let field_signature = CString::new("Landroid/net/Uri;")?;
         let uri_field = ((**env).v1_6.GetStaticFieldID)(env, downloads_class, field_name.as_ptr(), field_signature.as_ptr());
@@ -185,13 +186,36 @@ fn export_android_downloads(filename: &str, bytes: &[u8]) -> Result<String> {
         let detach = method(env, parcel_class, "detachFd", "()I")?;
         let fd: jint = ((**env).v1_6.CallIntMethod)(env, parcel, detach);
         anyhow::ensure!(fd >= 0, "Android returned an invalid report file descriptor");
-        fd
+        (fd, resolver, uri)
     };
 
     let mut file = unsafe { File::from_raw_fd(fd) };
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(format!("Download/Phira-Reports/{filename}"))
+    let write_result = file.write_all(bytes).and_then(|_| file.sync_all());
+    if let Err(error) = write_result {
+        unsafe {
+            let class = ((**env).v1_6.GetObjectClass)(env, resolver);
+            let delete = method(env, class, "delete", "(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I")?;
+            let none: jobject = std::ptr::null_mut();
+            ((**env).v1_6.CallIntMethod)(env, resolver, delete, uri, none, none);
+        }
+        return Err(error.into());
+    }
+    drop(file);
+    if mime_type.starts_with("image/") {
+        unsafe {
+            let values_class = find_class(env, "android/content/ContentValues")?;
+            let constructor = method(env, values_class, "<init>", "()V")?;
+            let values = ((**env).v1_6.NewObject)(env, values_class, constructor);
+            anyhow::ensure!(!values.is_null(), "failed to publish album image");
+            put_string(env, values, values_class, "is_pending", "0")?;
+            let class = ((**env).v1_6.GetObjectClass)(env, resolver);
+            let update = method(env, class, "update", "(Landroid/net/Uri;Landroid/content/ContentValues;Ljava/lang/String;[Ljava/lang/String;)I")?;
+            let none: jobject = std::ptr::null_mut();
+            let count = ((**env).v1_6.CallIntMethod)(env, resolver, update, uri, values, none, none);
+            anyhow::ensure!(count > 0 && !((**env).v1_6.ExceptionCheck)(env), "failed to publish album image");
+        }
+    }
+    Ok(format!("{relative_path}/{filename}"))
 }
 
 #[cfg(test)]

@@ -110,6 +110,41 @@ impl Default for JudgementRangeDebug {
     }
 }
 
+/// Cosmetic timing HUD; positions are fractions of the screen half-width/height.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TimingBarConfig {
+    pub enabled: bool,
+    pub record_counts: bool,
+    pub curved: bool,
+    pub record_seconds: f32,
+    pub x: f32,
+    pub y: f32,
+    pub size: f32,
+}
+impl Default for TimingBarConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            record_counts: true,
+            curved: false,
+            record_seconds: 3.,
+            x: 0.,
+            y: -0.65,
+            size: 100.,
+        }
+    }
+}
+impl TimingBarConfig {
+    pub fn retention_seconds(&self) -> f64 {
+        if self.record_seconds.is_finite() {
+            self.record_seconds.clamp(0.5, 10.) as f64
+        } else {
+            3.
+        }
+    }
+}
+
 pub static TIPS: Lazy<Vec<String>> = Lazy::new(|| include_str!("tips.txt").split('\n').map(str::to_owned).collect());
 
 bitflags! {
@@ -175,8 +210,12 @@ pub struct Config {
     pub fxaa: bool,
     pub interactive: bool,
     pub judgement_range_debug: JudgementRangeDebug,
+    pub timing_bar: TimingBarConfig,
     pub judgement_mode: JudgementMode,
     pub phigros_strict_judgement: bool,
+    /// Runtime-only course flag; never modifies saved normal-play preferences.
+    #[serde(skip)]
+    pub challenge_mode: bool,
     pub mods: Mods,
     pub mp_address: String,
     pub mp_enabled: bool,
@@ -229,8 +268,10 @@ impl Default for Config {
             fxaa: false,
             interactive: true,
             judgement_range_debug: JudgementRangeDebug::default(),
+            timing_bar: TimingBarConfig::default(),
             judgement_mode: JudgementMode::Phira,
             phigros_strict_judgement: false,
+            challenge_mode: false,
             mods: Mods::default(),
             mp_address: "mp2.phira.cn:12345".to_owned(),
             mp_enabled: false,
@@ -264,6 +305,19 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn enable_challenge(&mut self) {
+        self.challenge_mode = true;
+        self.judgement_mode = JudgementMode::PhigrosReplica;
+        self.phigros_strict_judgement = true;
+        self.autoplay = None;
+        self.mods.remove(Mods::AUTOPLAY);
+    }
+    pub fn apply_challenge_chart(&self, settings: &mut crate::chart_play::ChartPlaySettings) {
+        if self.challenge_mode {
+            settings.note_conversion = crate::chart_play::NoteConversion::Original;
+        }
+    }
+
     #[inline]
     pub fn flick_judgement_mode(&self) -> JudgementMode {
         self.judgement_mode
@@ -391,5 +445,55 @@ mod tests {
         config.init();
         assert_eq!(config.judgement_range_debug.horizon, JUDGEMENT_RANGE_HORIZON_MAX);
         assert_eq!(config.judgement_range_debug.fill_alpha, JUDGEMENT_RANGE_ALPHA_MIN);
+    }
+}
+
+#[cfg(test)]
+mod challenge_tests {
+    use super::*;
+    use crate::chart_play::{AutoFlipInterval, ChartPlaySettings, NoteConversion};
+    #[test]
+    fn mandatory_overrides_are_isolated_and_keep_other_preferences() {
+        let original = Config {
+            mods: Mods::AUTOPLAY | Mods::FLIP_X | Mods::NO_SHADER,
+            shorten_holds: true,
+            auto_flip_enabled: true,
+            speed: 0.75,
+            volume_music: 0.3,
+            ..Default::default()
+        };
+        let mut course = original.clone();
+        course.enable_challenge();
+        assert!(original.autoplay());
+        assert_eq!(original.judgement_mode, JudgementMode::Phira);
+        assert!(!course.autoplay());
+        assert!(course.phigros_strict_judgement);
+        assert_eq!(course.judgement_mode, JudgementMode::PhigrosReplica);
+        assert_eq!(course.flick_judgement_mode(), JudgementMode::PhigrosReplica);
+        assert!(course.mods.contains(Mods::FLIP_X | Mods::NO_SHADER));
+        assert_eq!(course.speed, original.speed);
+        assert_eq!(course.volume_music, original.volume_music);
+        assert!(course.shorten_holds && course.auto_flip_enabled);
+        assert!(serde_json::to_value(&course).unwrap().get("challengeMode").is_none());
+        for mode in [NoteConversion::Tap, NoteConversion::Drag, NoteConversion::Flick] {
+            let mut settings = ChartPlaySettings {
+                note_conversion: mode,
+                auto_flip_intervals: vec![AutoFlipInterval { start: 1., end: 2. }],
+            };
+            original.apply_challenge_chart(&mut settings);
+            assert_eq!(settings.note_conversion, mode);
+            course.apply_challenge_chart(&mut settings);
+            assert_eq!(settings.note_conversion, NoteConversion::Original);
+            assert_eq!(settings.auto_flip_intervals.len(), 1);
+        }
+    }
+    #[test]
+    fn legacy_autoplay_cannot_restore_itself_inside_course() {
+        let mut config: Config = serde_json::from_value(serde_json::json!({"autoplay":true})).unwrap();
+        config.init();
+        assert!(config.autoplay());
+        config.enable_challenge();
+        config.init();
+        assert!(!config.autoplay());
     }
 }

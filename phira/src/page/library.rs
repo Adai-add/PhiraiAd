@@ -92,6 +92,10 @@ type OnlineTask = Task<Result<OnlineTaskResult>>;
 pub struct LibraryPage {
     tabs: Tabs<ChartList>,
     rks: super::rks::RksPanel,
+    best_board: super::best_board::BestBoard,
+    best_board_export: super::best_board_export::BestBoardExport,
+    challenge: super::challenge::ChallengePanel,
+    challenge_scene: Option<NextScene>,
 
     current_page: u64,
     online_total_page: u64,
@@ -174,6 +178,10 @@ impl LibraryPage {
         let new_list = |ty| ChartList::new(ty, Arc::clone(&icons), rank_icons.clone());
         Ok(Self {
             rks: super::rks::RksPanel::new()?,
+            best_board: super::best_board::BestBoard::new(),
+            best_board_export: Default::default(),
+            challenge: super::challenge::ChallengePanel::new(),
+            challenge_scene: None,
             tabs: Tabs::new([
                 (new_list(ChartListType::Local), || tl!("local")),
                 (new_list(ChartListType::Ranked), || ttl!("chart-ranked")),
@@ -353,6 +361,7 @@ impl LibraryPage {
 
     fn sync_rks_views(&mut self) {
         for list in self.tabs.iter_mut() {
+            list.view.challenge_selecting = self.challenge.active;
             if list.ty == ChartListType::Local {
                 list.view.rks_values = Some(self.rks.resolved.clone());
                 list.view.rks_editing = self.rks.local_editing();
@@ -703,6 +712,13 @@ impl Page for LibraryPage {
 
     fn touch(&mut self, touch: &Touch, s: &mut SharedState) -> Result<bool> {
         let t = s.t;
+        if self.best_board_export.busy() {
+            return Ok(true);
+        }
+        if self.best_board.open {
+            self.best_board.touch(touch, t);
+            return Ok(true);
+        }
         if self.sync_fav_task.is_some()
             || self.export_task.is_some()
             || self.multi_create_fav_task.is_some()
@@ -710,6 +726,31 @@ impl Page for LibraryPage {
             || self.manage_fav_task.is_some()
             || self.refresh_local_fav_task.is_some()
         {
+            return Ok(true);
+        }
+        if self.tabs.selected().ty == ChartListType::Local && self.challenge.touch(touch, t)? {
+            if !self.challenge.active {
+                self.challenge_scene = None;
+            }
+            self.sync_rks_views();
+            if let Some(charts) = self.challenge.start.take() {
+                self.challenge_scene = Some(NextScene::Overlay(Box::new(crate::scene::challenge::ChallengeScene::new(charts))));
+            }
+            return Ok(true);
+        }
+        if self.tabs.selected().ty == ChartListType::Local
+            && !CHOOSE_COVER.load(Ordering::Relaxed)
+            && self.tabs.selected().view.rks_entry_available()
+            && !self.order_menu.showing()
+            && !self.order_meta_menu.showing()
+            && !self.manage_fav_menu.showing()
+            && !self.multi_operation_menu.showing()
+            && !self.multi_select_menu.showing()
+            && self.best_board.entry_touch(touch, t)
+        {
+            self.rks.refresh(s);
+            let (entries, rks) = self.rks.best_board();
+            self.best_board.show(entries, rks, s);
             return Ok(true);
         }
         let choose_cover = CHOOSE_COVER.load(Ordering::Relaxed);
@@ -763,6 +804,10 @@ impl Page for LibraryPage {
             return Ok(true);
         }
         if charts_view.touch(touch, t, s.rt)? {
+            if let Some(chart) = charts_view.challenge_selected.take() {
+                self.challenge.select(chart);
+                return Ok(true);
+            }
             if let Some(action) = charts_view.rks_action.take() {
                 self.rks.action(action)?;
                 self.sync_rks_views();
@@ -877,6 +922,9 @@ impl Page for LibraryPage {
 
     fn update(&mut self, s: &mut SharedState) -> Result<()> {
         self.rks.poll_ai();
+        self.best_board.update(s.t);
+        self.best_board_export.update();
+        self.challenge.update(s.t);
         let t = s.t;
         self.sync_rks_views();
 
@@ -1453,11 +1501,21 @@ impl Page for LibraryPage {
     fn render(&mut self, ui: &mut Ui, s: &mut SharedState) -> Result<()> {
         self.check_fav_page(s);
         self.rks.begin_render();
+        self.best_board.entry_active = false;
+        self.challenge.begin_render();
 
         let t = s.t;
         let rt = s.rt;
         let mut r = ui.content_rect();
         let chosen = self.tabs.selected().ty;
+        if chosen != ChartListType::Local && self.challenge.active {
+            self.challenge.close();
+        }
+        if self.challenge.active {
+            let extra_height = super::challenge::SELECTOR_EXTRA_HEIGHT;
+            r.y += extra_height;
+            r.h = (r.h - extra_height).max(0.05);
+        }
         if chosen != ChartListType::Local {
             r.h -= 0.08;
         }
@@ -1470,7 +1528,7 @@ impl Page for LibraryPage {
         if self.rks.editing {
             s.render_fader(ui, |ui| self.rks.render_header(ui, t));
         }
-        if chosen != ChartListType::Popular && !self.rks.editing {
+        if chosen != ChartListType::Popular && !self.rks.editing && !self.challenge.active {
             s.render_fader(ui, |ui| {
                 let multi_select = self.tabs.selected().view.multi_select.is_some();
                 let mut r = Rect::new(r.right(), -ui.top + 0.04, 0., r.y + ui.top - 0.06);
@@ -1580,7 +1638,7 @@ impl Page for LibraryPage {
                 }
 
                 let empty = self.search_str.is_empty();
-                r.w = 0.53;
+                r.w = 0.34;
                 r.x -= r.w + 0.02;
                 if empty {
                     r.x += r.h;
@@ -1588,7 +1646,15 @@ impl Page for LibraryPage {
                 }
                 let rt = r.right();
                 if chosen == ChartListType::Local && !multi_select && !CHOOSE_COVER.load(Ordering::Relaxed) {
-                    self.rks.render_entry(ui, t, Rect::new(r.x - 0.30 - 0.018, r.y, 0.30, r.h));
+                    self.rks.render_entry(ui, t, Rect::new(r.x - 0.24 - 0.018, r.y, 0.24, r.h));
+                }
+                if chosen == ChartListType::Local && !multi_select && !CHOOSE_COVER.load(Ordering::Relaxed) {
+                    let offset = 0.24 + 0.036;
+                    let board_rect = Rect::new(r.x - offset - 0.20, r.y, 0.20, r.h);
+                    self.best_board.render_entry(ui, t, board_rect, self.rks.best_board_count());
+                    let width = super::challenge::ENTRY_WIDTH;
+                    self.challenge
+                        .render_entry(ui, t, Rect::new(board_rect.x - 0.018 - width, r.y, width, r.h));
                 }
                 self.search_btn.render_shadow(ui, r, t, |ui, path| {
                     ui.fill_path(&path, semi_black(0.4));
@@ -1674,6 +1740,19 @@ impl Page for LibraryPage {
         if !CHOOSE_COVER.load(Ordering::Relaxed) {
             self.rks.render_overlay(ui, t);
         }
+        let challenge_enabled = self.tabs.selected().ty == ChartListType::Local
+            && !CHOOSE_COVER.load(Ordering::Relaxed)
+            && !self.rks.editing
+            && !self.best_board.open
+            && self.tabs.selected().view.rks_entry_available()
+            && !self.order_menu.showing()
+            && !self.order_meta_menu.showing()
+            && !self.manage_fav_menu.showing()
+            && !self.multi_operation_menu.showing()
+            && !self.multi_select_menu.showing();
+        self.challenge.render(ui, t, challenge_enabled);
+        self.best_board.render(ui, t);
+        self.best_board_export.render(&mut self.best_board, ui, t);
         if self.sync_fav_task.is_some() {
             ui.full_loading_simple(t);
         }
@@ -1697,12 +1776,25 @@ impl Page for LibraryPage {
     }
 
     fn on_back_pressed(&mut self, _s: &mut SharedState) -> bool {
+        if self.best_board_export.cancel() {
+            return true;
+        }
+        if self.best_board.close() {
+            return true;
+        }
+        if self.challenge.close() {
+            self.challenge_scene = None;
+            self.sync_rks_views();
+            return true;
+        }
         let handled = self.rks.back();
         self.sync_rks_views();
         handled
     }
 
     fn next_scene(&mut self, _s: &mut SharedState) -> NextScene {
-        self.tabs.selected_mut().view.next_scene().unwrap_or_default()
+        self.challenge_scene
+            .take()
+            .unwrap_or_else(|| self.tabs.selected_mut().view.next_scene().unwrap_or_default())
     }
 }

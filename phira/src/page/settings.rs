@@ -288,6 +288,10 @@ impl Page for SettingsPage {
     }
 
     fn next_page(&mut self) -> NextPage {
+        if self.list_replica.timing_edit_requested {
+            self.list_replica.timing_edit_requested = false;
+            return NextPage::Overlay(Box::new(super::timing_editor::TimingEditor::new()));
+        }
         if matches!(self.tabs.selected(), SettingListType::Audio) {
             return self.list_audio.next_page().unwrap_or_default();
         }
@@ -1416,6 +1420,12 @@ struct ReplicaList {
     reports_btn: DRectButton,
     gameplay_open: bool,
     reports_open: bool,
+    timing_btn: DRectButton,
+    timing_open: bool,
+    timing_enabled_btn: DRectButton,
+    timing_counts_btn: DRectButton,
+    timing_edit_btn: DRectButton,
+    timing_edit_requested: bool,
 }
 impl ReplicaList {
     fn new() -> Self {
@@ -1429,12 +1439,37 @@ impl ReplicaList {
             reports_btn: DRectButton::new(),
             gameplay_open: true,
             reports_open: true,
+            timing_btn: DRectButton::new(),
+            timing_open: true,
+            timing_enabled_btn: DRectButton::new(),
+            timing_counts_btn: DRectButton::new(),
+            timing_edit_btn: DRectButton::new(),
+            timing_edit_requested: false,
         }
     }
     fn top_touch(&mut self, touch: &Touch, t: f32) -> bool {
         (self.gameplay_open && self.chart.top_touch(touch, t)) || (self.ranges_open && self.debug.top_touch(touch, t))
     }
     fn touch(&mut self, touch: &Touch, t: f32) -> Result<Option<bool>> {
+        if self.timing_btn.touch(touch, t) {
+            self.timing_open ^= true;
+            self.timing_edit_btn = DRectButton::new();
+            self.timing_enabled_btn = DRectButton::new();
+            self.timing_counts_btn = DRectButton::new();
+            return Ok(Some(false));
+        }
+        if self.timing_open && self.timing_edit_btn.touch(touch, t) {
+            self.timing_edit_requested = true;
+            return Ok(Some(false));
+        }
+        if self.timing_open && self.timing_enabled_btn.touch(touch, t) {
+            get_data_mut().config.timing_bar.enabled ^= true;
+            return Ok(Some(true));
+        }
+        if self.timing_open && self.timing_counts_btn.touch(touch, t) {
+            get_data_mut().config.timing_bar.record_counts ^= true;
+            return Ok(Some(true));
+        }
         if self.gameplay_btn.touch(touch, t) {
             self.gameplay_open ^= true;
             // Reset popup/hit targets when collapsing, without changing the saved settings.
@@ -1480,11 +1515,13 @@ impl ReplicaList {
             .draw();
         ui.dy(0.09);
         let mut h = 0.09;
-        for group in 0..3 {
+        for group in 0..4 {
             let (btn, open, label) = if group == 0 {
                 (&mut self.gameplay_btn, self.gameplay_open, tl!("replica-gameplay"))
             } else if group == 1 {
                 (&mut self.ranges_btn, self.ranges_open, tl!("replica-ranges"))
+            } else if group == 2 {
+                (&mut self.timing_btn, self.timing_open, Cow::Borrowed("按键准度条"))
             } else {
                 (&mut self.reports_btn, self.reports_open, tl!("replica-reports"))
             };
@@ -1499,6 +1536,23 @@ impl ReplicaList {
                         self.chart.render(ui, child, t)
                     } else if group == 1 {
                         self.debug.render(ui, child, t)
+                    } else if group == 2 {
+                        let w = child.w;
+                        let config = &get_data().config.timing_bar;
+                        ui.text("显示准度条").pos(0.035, 0.025).size(0.5).max_width(w - 0.57).draw();
+                        self.timing_edit_btn
+                            .render_text(ui, Rect::new(w - 0.52, 0.02, 0.20, 0.08), t, "编辑", 0.4, false);
+                        render_switch(ui, Rect::new(w - INTERACT_WIDTH, 0.02, INTERACT_WIDTH, 0.08), t, &mut self.timing_enabled_btn, config.enabled);
+                        ui.dy(0.12);
+                        ui.text("按键记录").pos(0.035, 0.025).size(0.5).max_width(w - 0.39).draw();
+                        render_switch(
+                            ui,
+                            Rect::new(w - INTERACT_WIDTH, 0.02, INTERACT_WIDTH, 0.08),
+                            t,
+                            &mut self.timing_counts_btn,
+                            config.record_counts,
+                        );
+                        (w, 0.24)
                     } else {
                         self.reports.render(ui, child, t)
                     }
