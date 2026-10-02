@@ -450,7 +450,7 @@ impl GameScene {
         ((1. / playback_speed.max(PLAYBACK_SPEED_MIN) * 1000.).round() / 1000.).clamp(NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_MAX)
     }
 
-    fn effective_note_flow_speed(&self) -> f32 {
+    fn practice_note_flow_speed(&self) -> f32 {
         if self.mode == GameMode::Exercise {
             if self.exercise_note_flow_locked {
                 Self::locked_note_flow_speed(self.res.config.speed)
@@ -460,6 +460,10 @@ impl GameScene {
         } else {
             1.
         }
+    }
+
+    fn effective_note_flow_speed(&self) -> f32 {
+        self.res.config.effective_note_flow_speed(self.practice_note_flow_speed())
     }
 
     fn sync_note_flow_speed(&mut self) {
@@ -944,7 +948,7 @@ impl GameScene {
                         Some(0.46),
                     );
                     ui.dy(0.19);
-                    let mut displayed_note_flow_speed = self.effective_note_flow_speed();
+                    let mut displayed_note_flow_speed = self.practice_note_flow_speed();
                     let previous_note_flow_speed = displayed_note_flow_speed;
                     ui.practice_speed_slider(
                         "exercise_note_flow",

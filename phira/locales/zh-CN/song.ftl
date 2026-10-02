@@ -155,3 +155,5 @@ export = 导出
 exporting = 导出中…
 
 chart-play-settings = 自动倒打
+
+mods-note-flow-speed = 流速倍速（全局）

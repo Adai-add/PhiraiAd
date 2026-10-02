@@ -133,3 +133,5 @@ export = 匯出
 exporting = 匯出中…
 
 chart-play-settings = 自動倒打
+
+mods-note-flow-speed = 流速倍速（全域）

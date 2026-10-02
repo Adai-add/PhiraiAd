@@ -220,6 +220,8 @@ pub struct Config {
     pub mp_address: String,
     pub mp_enabled: bool,
     pub note_scale: f32,
+    /// Global visual flow multiplier, edited from any chart Mods panel.
+    pub note_flow_speed: f32,
     pub offline_mode: bool,
     pub offset: f32,
     pub particle: bool,
@@ -276,6 +278,7 @@ impl Default for Config {
             mp_address: "mp2.phira.cn:12345".to_owned(),
             mp_enabled: false,
             note_scale: 1.0,
+            note_flow_speed: 1.,
             offline_mode: false,
             fullscreen_mode: false,
             offset: 0.,
@@ -348,10 +351,28 @@ impl Config {
         !self.autoplay()
     }
 
+    /// Keep malformed/legacy saved data away from the renderer.
+    pub fn global_note_flow_speed(&self) -> f32 {
+        if self.note_flow_speed.is_finite() {
+            self.note_flow_speed.clamp(0.1, 5.)
+        } else {
+            1.
+        }
+    }
+
+    /// Practice retains its independent multiplier (including the inverse-speed lock).
+    pub fn effective_note_flow_speed(&self, practice_multiplier: f32) -> f32 {
+        self.global_note_flow_speed() * practice_multiplier
+    }
+
     pub fn init(&mut self) {
         // Removed split-Flick and online-local switches deserialize as ignored legacy keys.
-        // The settings-page playback override is retired; practice adjusts its own run config.
-        self.speed = 1.;
+        self.speed = if self.speed.is_finite() {
+            self.speed.clamp(0.5, 2.)
+        } else {
+            1.
+        };
+        self.note_flow_speed = self.global_note_flow_speed();
         self.judgement_range_debug.horizon = self
             .judgement_range_debug
             .horizon
@@ -495,5 +516,48 @@ mod challenge_tests {
         config.enable_challenge();
         config.init();
         assert!(!config.autoplay());
+    }
+}
+
+#[cfg(test)]
+mod speed_tests {
+    use super::Config;
+
+    #[test]
+    fn playback_and_global_flow_preferences_persist_across_loading() {
+        let mut config: Config = serde_json::from_str(r#"{"speed":0.75,"noteFlowSpeed":1.5}"#).unwrap();
+        config.init();
+        assert_eq!(config.speed, 0.75);
+        assert_eq!(config.note_flow_speed, 1.5);
+        let mut restored: Config = serde_json::from_slice(&serde_json::to_vec(&config).unwrap()).unwrap();
+        restored.init();
+        assert_eq!(restored.speed, 0.75);
+        assert_eq!(restored.note_flow_speed, 1.5);
+        assert_eq!(serde_json::from_str::<Config>("{}").unwrap().note_flow_speed, 1.);
+    }
+
+    #[test]
+    fn flow_multiplies_practice_without_changing_playback_or_clipping_the_product() {
+        let config = Config { speed: 0.5, note_flow_speed: 5., ..Default::default() };
+        assert_eq!(config.effective_note_flow_speed(1.), 5.);
+        assert_eq!(config.effective_note_flow_speed(2.), 10.);
+        assert_eq!(config.effective_note_flow_speed(20.), 100.);
+        assert_eq!(config.speed, 0.5);
+        let config = Config { note_flow_speed: 1.5, ..Default::default() };
+        assert!((config.effective_note_flow_speed(0.8) - 1.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn invalid_speed_preferences_are_sanitized() {
+        for (playback, flow, expected_playback, expected_flow) in [
+            (f32::NAN, f32::INFINITY, 1., 1.),
+            (0., -1., 0.5, 0.1),
+            (100., 100., 2., 5.),
+        ] {
+            let mut config = Config { speed: playback, note_flow_speed: flow, ..Default::default() };
+            config.init();
+            assert_eq!(config.speed, expected_playback);
+            assert_eq!(config.note_flow_speed, expected_flow);
+        }
     }
 }

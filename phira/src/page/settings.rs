@@ -841,6 +841,7 @@ struct ChartList {
     dhint_btn: DRectButton,
     opt_btn: DRectButton,
     use_keyboard_btn: DRectButton,
+    speed_slider: Slider,
     size_slider: Slider,
 }
 
@@ -866,6 +867,7 @@ impl ChartList {
             dhint_btn: DRectButton::new(),
             opt_btn: DRectButton::new(),
             use_keyboard_btn: DRectButton::new(),
+            speed_slider: Slider::new(0.5..2., 0.05),
             size_slider: Slider::new(0.8..1.2, 0.005),
         }
     }
@@ -929,6 +931,9 @@ impl ChartList {
             return Ok(Some(true));
         }
         if !self.replica {
+            if let wt @ Some(_) = self.speed_slider.touch(touch, t, &mut config.speed) {
+                return Ok(wt);
+            }
             if let wt @ Some(_) = self.size_slider.touch(touch, t, &mut config.note_scale) {
                 return Ok(wt);
             }
@@ -1043,6 +1048,12 @@ impl ChartList {
             item! { w;
                 render_partition_title(ui, w, self.replica, tl!("item-use-keyboard"), Some(tl!("item-use-keyboard-sub")));
                 render_switch(ui, rr, t, &mut self.use_keyboard_btn, config.use_keyboard);
+            }
+        }
+        if !self.replica {
+            item! { w;
+                render_partition_title(ui, w, self.replica, tl!("item-speed"), None);
+                self.speed_slider.render(ui, rr, t, config.speed, format!("{:.2}", config.speed));
             }
         }
         if !self.replica {

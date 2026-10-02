@@ -134,3 +134,5 @@ export = Export
 exporting = Exporting...
 
 chart-play-settings = Auto flip
+
+mods-note-flow-speed = Note flow speed (global)

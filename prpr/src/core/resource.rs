@@ -526,6 +526,7 @@ impl Resource {
         let aspect_ratio = config.aspect_ratio.unwrap_or(info.aspect_ratio);
         let note_width = config.note_scale * NOTE_WIDTH_RATIO_BASE as f32;
         let note_scale = config.note_scale;
+        let note_flow_speed = config.global_note_flow_speed();
 
         let emitter = ParticleEmitter::new(&res_pack, note_scale, res_pack.info.hide_particles)?;
 
@@ -539,7 +540,7 @@ impl Resource {
             dpi: DPI_VALUE.load(std::sync::atomic::Ordering::SeqCst),
             last_vp: (0, 0, 0, 0),
             note_width,
-            note_flow_speed: 1.,
+            note_flow_speed,
             practice_view: Default::default(),
             auto_flip_y: false,
             rotate_chart: false,

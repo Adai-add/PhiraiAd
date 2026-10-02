@@ -1,0 +1,12 @@
+{
+    "baseApk":  "/mnt/c/Users/admin/Desktop/phira-rep/签名/Phira-Replica-0.8.2-r23.0.apk",
+    "keystore":  "/mnt/c/Users/admin/Desktop/phira-rep/签名/phira-replica-release.jks",
+    "keyAlias":  "phira-replica",
+    "passwordFile":  "/mnt/c/Users/admin/Desktop/phira-rep/签名/key.txt",
+    "ndk":  "/home/adai_add/Android/Sdk/ndk/27.3.13750724",
+    "buildTools":  "/home/adai_add/Android/Sdk/build-tools/35.0.0",
+    "vcpkgRoot":  "E:\\PhiraiAd-vcpkg",
+    "version":  "1.1.0",
+    "minimumVersionCode":  11000,
+    "proxy":  "http://127.0.0.1:51081"
+}

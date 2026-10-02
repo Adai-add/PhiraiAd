@@ -49,7 +49,7 @@ use prpr::{
     },
     task::Task,
     time::TimeManager,
-    ui::{button_hit, render_chart_info, ChartInfoEdit, DRectButton, Dialog, LoadingParams, LongTouchState, RectButton, Scroll, Ui, UI_AUDIO},
+    ui::{button_hit, render_chart_info, ChartInfoEdit, DRectButton, Dialog, LoadingParams, LongTouchState, RectButton, Scroll, Slider, Ui, UI_AUDIO},
 };
 use regex::Regex;
 use reqwest::Method;
@@ -338,6 +338,7 @@ pub struct SongScene {
     mod_btn: RectButton,
     mod_scroll: Scroll,
     mod_btns: Vec<(DRectButton, bool)>,
+    note_flow_slider: Slider,
     note_conversion_mods: prpr::ui::note_conversion_mods::NoteConversionMods,
     chart_play_settings: prpr::chart_play::ChartPlaySettings,
 
@@ -537,6 +538,7 @@ impl SongScene {
             mod_btn: RectButton::new(),
             mod_scroll: Scroll::new(),
             mod_btns: Vec::new(),
+            note_flow_slider: Slider::new(0.1..5., 0.01),
             note_conversion_mods: Default::default(),
             chart_play_settings: Default::default(),
 
@@ -1391,6 +1393,22 @@ impl SongScene {
                 }};
             }
             dy!(ui.text(tl!("mods")).size(0.9).draw_using(&BOLD_FONT).h + 0.02);
+            ui.text(tl!("mods-note-flow-speed"))
+                .pos(0.03, 0.045)
+                .anchor(0., 0.5)
+                .no_baseline()
+                .size(0.6)
+                .max_width(width - 0.06)
+                .draw();
+            let flow_speed = get_data().config.global_note_flow_speed();
+            self.note_flow_slider.render(
+                ui,
+                Rect::new(width - 0.28, 0.10, 0.23, 0.09),
+                rt,
+                flow_speed,
+                format!("{flow_speed:.2}×"),
+            );
+            dy!(0.23);
             let rh = ITEM_HEIGHT * 3. / 5.;
             let rr = Rect::new(width - 0.24, (ITEM_HEIGHT - rh) / 2., 0.2, rh);
             let mut index = 0;
@@ -1859,6 +1877,12 @@ impl Scene for SongScene {
                             return Ok(true);
                         }
                         let rt = tm.real_time() as _;
+                        if let Some(changed) = self.note_flow_slider.touch(touch, rt, &mut get_data_mut().config.note_flow_speed) {
+                            if changed {
+                                save_data()?;
+                            }
+                            return Ok(true);
+                        }
                         if let Some(mode) = self.note_conversion_mods.touch(touch, rt, self.chart_play_settings.note_conversion) {
                             let mut settings = self.chart_play_settings.clone();
                             settings.note_conversion = mode;
