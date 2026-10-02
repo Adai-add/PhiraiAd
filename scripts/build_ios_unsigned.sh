@@ -39,7 +39,7 @@ xcodebuild -project phira.xcodeproj -scheme phira \
 git diff --exit-code -- Cargo.lock
 app_dir="$work_dir/PhiraiAd.xcarchive/Products/Applications/Phira.app"
 python3 scripts/prepare_ios_unsigned.py verify "$app_dir"
-xcrun lipo -verify_arch arm64 "$app_dir/phira-main"
+xcrun lipo "$app_dir/phira-main" -verify_arch arm64
 xcrun vtool -show-build "$app_dir/phira-main"
 mkdir -p "$work_dir/package/Payload"
 ditto "$app_dir" "$work_dir/package/Payload/PhiraiAd.app"
