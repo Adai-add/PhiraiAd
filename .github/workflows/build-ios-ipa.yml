@@ -1,0 +1,62 @@
+name: Build iOS IPA (unsigned)
+
+on:
+  workflow_dispatch:
+    inputs:
+      assets_apk_url:
+        description: "APK URL used only to fill missing runtime assets"
+        required: true
+        default: "https://github.com/Adai-add/PhiraiAd/releases/download/v1.0.0/PhiraiAd-v1.0.0-arm64.apk"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-09-14
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/xcode
+      IPHONEOS_DEPLOYMENT_TARGET: "12.0"
+      ASSETS_APK_URL: ${{ inputs.assets_apk_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust and Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustup target add aarch64-apple-ios --toolchain "$RUSTUP_TOOLCHAIN"
+      - name: Cache build dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/xcode
+            prpr-avc/static-lib
+          key: ios-${{ runner.os }}-${{ runner.arch }}-nightly-2026-09-14-${{ hashFiles('Cargo.lock', 'prpr-avc/ffmpeg-version') }}
+      - name: Build unsigned IPA
+        shell: bash
+        run: bash scripts/build_ios_unsigned.sh
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhiraiAd-v1.1.0-ios-unsigned
+          path: |
+            dist/PhiraiAd-v1.1.0-ios-unsigned.ipa
+            dist/PhiraiAd-v1.1.0-ios-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-log
+          path: dist/ios-xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 14
