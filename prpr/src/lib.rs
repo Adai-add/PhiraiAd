@@ -9,6 +9,7 @@ pub mod fs;
 pub mod info;
 pub mod judge;
 pub mod judgement_range;
+pub mod noise_area;
 pub mod parse;
 pub mod particle;
 mod phigros_judge;

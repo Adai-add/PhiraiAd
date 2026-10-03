@@ -5,6 +5,7 @@ use crate::{
     config::{Config, JudgementMode},
     core::{BadNote, Chart, Matrix, NoteKind, Point, Resource, Vector, NOTE_WIDTH_RATIO_BASE},
     ext::{get_viewport, NotNanExt},
+    noise_area::NoiseAreaState,
 };
 use macroquad::prelude::{
     utils::{register_input_subscriber, repeat_all_miniquad_input},
@@ -730,6 +731,9 @@ pub struct Judge {
     // snapshot is also used to recover if a terminal event was lost on pause.
     active_fingers: HashMap<u64, Vec2>,
 
+    /// Finger ids currently inside a chart block area.
+    noise_state: NoiseAreaState,
+
     // FingerManagement uses a persistent List<Fingers>, so simultaneous
     // fingers are always processed in insertion order rather than hash order.
     finger_order: Vec<u64>,
@@ -806,6 +810,7 @@ impl Judge {
             last_time: 0.,
 
             active_fingers: HashMap::new(),
+            noise_state: NoiseAreaState::default(),
             finger_order: Vec::new(),
             recent_frame_times: RecentFrameTimes::default(),
             replica,
@@ -862,6 +867,7 @@ impl Judge {
         }
         self.trackers.clear();
         self.active_fingers.clear();
+        self.noise_state.blocked_ids.clear();
         self.finger_order.clear();
         self.official_tracker_clock = 0.;
     }
@@ -1198,6 +1204,16 @@ impl Judge {
                 .collect()
         };
         let any_official = other_official || flick_official;
+        if res.config.noise_area.enabled && !chart.extra.block_areas.is_empty() {
+            let aspect = get_viewport().2 as f32 / get_viewport().3.max(1) as f32;
+            let points = touches.values().map(|touch| {
+                (touch.id, vec2((touch.position.x / aspect + 1.) * 0.5, (touch.position.y + 1.) * 0.5))
+            }).collect::<Vec<_>>();
+            self.noise_state.update(&chart.extra.block_areas, &points, t as f32, true);
+            touches.retain(|id, _| !self.noise_state.is_blocked(*id));
+        } else {
+            self.noise_state.blocked_ids.clear();
+        }
         let active_snapshot_ids: HashSet<u64> = touches
             .values()
             .filter(|touch| matches!(touch.phase, TouchPhase::Started | TouchPhase::Moved | TouchPhase::Stationary))

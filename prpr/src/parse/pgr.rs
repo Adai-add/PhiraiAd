@@ -11,6 +11,7 @@ use crate::{
         Object, HEIGHT_RATIO,
     },
     ext::NotNanExt,
+    noise_area::BlockArea,
     judge::{HitSound, JudgeStatus},
 };
 
@@ -70,6 +71,8 @@ struct PgrChart {
     format_version: u32,
     offset: f32,
     judge_line_list: Vec<PgrJudgeLine>,
+    #[serde(default, alias = "block_area")]
+    block_area_list: Vec<BlockArea>,
 }
 
 macro_rules! validate_events {
@@ -265,9 +268,11 @@ fn parse_judge_line(pgr: PgrJudgeLine, max_time: f64, format_version: u32) -> Re
     })
 }
 
-pub fn parse_phigros(source: &str, extra: ChartExtra) -> Result<Chart> {
+pub fn parse_phigros(source: &str, mut extra: ChartExtra) -> Result<Chart> {
     let pgr: PgrChart = serde_json::from_str(source).with_context(|| ptl!("json-parse-failed"))?;
     let format_version = pgr.format_version;
+    let mut block_areas = pgr.block_area_list;
+    for area in &mut block_areas { area.normalize(); }
     let max_time = *pgr
         .judge_line_list
         .iter()
@@ -293,5 +298,6 @@ pub fn parse_phigros(source: &str, extra: ChartExtra) -> Result<Chart> {
         .collect::<Result<Vec<_>>>()?;
 
     process_lines(&mut lines);
+    extra.block_areas = block_areas;
     Ok(Chart::new(pgr.offset, lines, BpmList::default(), ChartSettings::default(), extra, HashMap::new()))
 }

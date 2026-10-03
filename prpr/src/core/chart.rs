@@ -16,6 +16,8 @@ use std::{cell::RefCell, collections::HashMap};
 pub struct ChartExtra {
     pub effects: Vec<Effect>,
     pub global_effects: Vec<Effect>,
+    /// Blocked touch regions exported by Phigros charts.
+    pub block_areas: Vec<crate::noise_area::BlockArea>,
     #[cfg(feature = "video")]
     pub videos: Vec<(super::Video, Option<super::VideoAttach>)>,
 }

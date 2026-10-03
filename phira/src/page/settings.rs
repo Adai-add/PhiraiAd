@@ -1437,6 +1437,12 @@ struct ReplicaList {
     timing_counts_btn: DRectButton,
     timing_edit_btn: DRectButton,
     timing_edit_requested: bool,
+    noise_btn: DRectButton,
+    noise_open: bool,
+    noise_enabled_btn: DRectButton,
+    noise_precise_btn: DRectButton,
+    noise_distortion_btn: DRectButton,
+    noise_music_btn: DRectButton,
 }
 impl ReplicaList {
     fn new() -> Self {
@@ -1456,6 +1462,12 @@ impl ReplicaList {
             timing_counts_btn: DRectButton::new(),
             timing_edit_btn: DRectButton::new(),
             timing_edit_requested: false,
+            noise_btn: DRectButton::new(),
+            noise_open: true,
+            noise_enabled_btn: DRectButton::new(),
+            noise_precise_btn: DRectButton::new(),
+            noise_distortion_btn: DRectButton::new(),
+            noise_music_btn: DRectButton::new(),
         }
     }
     fn top_touch(&mut self, touch: &Touch, t: f32) -> bool {
@@ -1480,6 +1492,17 @@ impl ReplicaList {
         if self.timing_open && self.timing_counts_btn.touch(touch, t) {
             get_data_mut().config.timing_bar.record_counts ^= true;
             return Ok(Some(true));
+        }
+        if self.noise_btn.touch(touch, t) {
+            self.noise_open ^= true;
+            return Ok(Some(false));
+        }
+        if self.noise_open {
+            let cfg = &mut get_data_mut().config.noise_area;
+            if self.noise_enabled_btn.touch(touch, t) { cfg.enabled ^= true; return Ok(Some(true)); }
+            if cfg.enabled && self.noise_precise_btn.touch(touch, t) { cfg.precise_edges ^= true; return Ok(Some(true)); }
+            if cfg.enabled && self.noise_distortion_btn.touch(touch, t) { cfg.remove_distortion ^= true; return Ok(Some(true)); }
+            if cfg.enabled && self.noise_music_btn.touch(touch, t) { cfg.music_unaffected ^= true; return Ok(Some(true)); }
         }
         if self.gameplay_btn.touch(touch, t) {
             self.gameplay_open ^= true;
@@ -1526,13 +1549,15 @@ impl ReplicaList {
             .draw();
         ui.dy(0.09);
         let mut h = 0.09;
-        for group in 0..4 {
+        for group in 0..5 {
             let (btn, open, label) = if group == 0 {
                 (&mut self.gameplay_btn, self.gameplay_open, tl!("replica-gameplay"))
             } else if group == 1 {
                 (&mut self.ranges_btn, self.ranges_open, tl!("replica-ranges"))
             } else if group == 2 {
                 (&mut self.timing_btn, self.timing_open, Cow::Borrowed("按键准度条"))
+            } else if group == 3 {
+                (&mut self.noise_btn, self.noise_open, Cow::Borrowed("噪域"))
             } else {
                 (&mut self.reports_btn, self.reports_open, tl!("replica-reports"))
             };
@@ -1564,6 +1589,24 @@ impl ReplicaList {
                             config.record_counts,
                         );
                         (w, 0.24)
+                    } else if group == 3 {
+                        let w = child.w;
+                        let cfg = &get_data().config.noise_area;
+                        let row = |ui: &mut Ui, y: f32, title: &str, subtitle: Option<&str>, btn: &mut DRectButton, value: bool| {
+                            render_partition_title(ui, w, true, title, subtitle.map(Cow::Borrowed));
+                            render_switch(ui, Rect::new(w - INTERACT_WIDTH, y + 0.02, INTERACT_WIDTH, 0.08), t, btn, value);
+                        };
+                        row(ui, 0., "噪域开/关", None, &mut self.noise_enabled_btn, cfg.enabled);
+                        ui.dy(0.12);
+                        if cfg.enabled {
+                            row(ui, 0., "精确边缘", Some("开启后将原版模糊的边缘渲染成精确边缘"), &mut self.noise_precise_btn, cfg.precise_edges);
+                            ui.dy(0.15);
+                            row(ui, 0., "去除扭曲特效", Some("开启后噪域内的判定线、音符不再扭曲"), &mut self.noise_distortion_btn, cfg.remove_distortion);
+                            ui.dy(0.15);
+                            row(ui, 0., "音乐不受影响", None, &mut self.noise_music_btn, cfg.music_unaffected);
+                            ui.dy(0.12);
+                            (w, 0.54)
+                        } else { (w, 0.12) }
                     } else {
                         self.reports.render(ui, child, t)
                     }

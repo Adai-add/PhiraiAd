@@ -211,6 +211,8 @@ pub struct Config {
     pub interactive: bool,
     pub judgement_range_debug: JudgementRangeDebug,
     pub timing_bar: TimingBarConfig,
+    /// Phigros block-area rendering and audio switches.
+    pub noise_area: crate::noise_area::NoiseAreaConfig,
     pub judgement_mode: JudgementMode,
     pub phigros_strict_judgement: bool,
     /// Runtime-only course flag; never modifies saved normal-play preferences.
@@ -271,6 +273,7 @@ impl Default for Config {
             interactive: true,
             judgement_range_debug: JudgementRangeDebug::default(),
             timing_bar: TimingBarConfig::default(),
+            noise_area: crate::noise_area::NoiseAreaConfig::default(),
             judgement_mode: JudgementMode::Phira,
             phigros_strict_judgement: false,
             challenge_mode: false,

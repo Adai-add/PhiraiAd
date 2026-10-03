@@ -757,8 +757,17 @@ impl Scene for MainScene {
     fn render(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
         set_camera(&ui.camera());
 
-        STRIPE_MATERIAL.set_uniform("time", ((tm.real_time() * 0.025) % (std::f64::consts::PI * 2.)) as f32);
-        gl_use_material(*STRIPE_MATERIAL);
+        if let Some(material) = &*STRIPE_MATERIAL {
+            material.set_uniform(
+                "time",
+                ((tm.real_time() * 0.025) % (std::f64::consts::PI * 2.)) as f32,
+            );
+            gl_use_material(*material);
+        } else {
+            // On platforms where the stripe shader cannot be created (notably some iOS
+            // configurations), fall back to the default material instead of panicking.
+            gl_use_default_material();
+        }
         ui.fill_rect(ui.screen_rect(), (*self.background, ui.screen_rect()));
         gl_use_default_material();
 
@@ -856,16 +865,24 @@ impl Scene for MainScene {
     }
 }
 
-static STRIPE_MATERIAL: Lazy<Material> = Lazy::new(|| {
-    load_material(
+static STRIPE_MATERIAL: Lazy<Option<Material>> = Lazy::new(|| {
+    match load_material(
         shader::VERTEX,
         shader::FRAGMENT,
         MaterialParams {
             uniforms: vec![("time".to_owned(), UniformType::Float1)],
             ..Default::default()
         },
-    )
-    .unwrap()
+    ) {
+        Ok(material) => Some(material),
+        Err(err) => {
+            warn!(
+                "failed to initialize stripe material; drawing background without stripe shader: {:?}",
+                err
+            );
+            None
+        }
+    }
 });
 
 mod shader {
