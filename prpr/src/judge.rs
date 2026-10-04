@@ -2187,7 +2187,9 @@ impl Judge {
                     let Some(stage) = classify(offset) else {
                         continue;
                     };
-                    if stage == count - 1 {
+                    // A Hold head cannot receive Bad. Ignore early presses in the
+                    // Bad interval so the head remains available for a later valid hit.
+                    if stage == count - 1 || (stage == 0 && matches!(note.kind, NoteKind::Hold { .. })) {
                         continue;
                     }
                     note.object.translation.0.set_time(hit);
