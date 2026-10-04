@@ -604,11 +604,21 @@ impl Main {
     }
 
     pub fn pause(&mut self) -> Result<()> {
+        if self.paused {
+            crate::log::diagnostic_event("LIFECYCLE duplicate pause ignored; already paused");
+            return Ok(());
+        }
         self.paused = true;
         self.scenes.last_mut().unwrap().pause(&mut self.tm)
     }
 
     pub fn resume(&mut self) -> Result<()> {
+        // iOS also sends resume on initial activation, before any pause.
+        // Only forward an actual paused -> running transition to the scene.
+        if !self.paused {
+            crate::log::diagnostic_event("LIFECYCLE resume ignored; already running");
+            return Ok(());
+        }
         self.paused = false;
         self.scenes.last_mut().unwrap().resume(&mut self.tm)
     }

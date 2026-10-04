@@ -99,16 +99,91 @@ impl TimeManager {
     }
 
     pub fn pause(&mut self) {
-        self.pause_time = Some(self.real_time());
+        if self.pause_time.is_none() {
+            self.pause_time = Some(self.real_time());
+        }
     }
 
     pub fn resume(&mut self) {
-        self.start_time += self.real_time() - self.pause_time.take().unwrap();
-        self.wait();
+        if let Some(pause_time) = self.pause_time.take() {
+            self.start_time += self.real_time() - pause_time;
+            self.wait();
+        }
     }
 
     pub fn seek_to(&mut self, pos: f64) {
         self.start_time = self.pause_time.unwrap_or_else(&self.get_time_fn) - pos / self.speed;
         self.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TimeManager;
+    use std::{cell::Cell, rc::Rc};
+
+    fn clock() -> (TimeManager, Rc<Cell<f64>>) {
+        let time = Rc::new(Cell::new(0.));
+        let source = Rc::clone(&time);
+        (TimeManager::manual(Box::new(move || source.get())), time)
+    }
+
+    #[test]
+    fn initial_resume_keeps_running_clock() {
+        let (mut tm, time) = clock();
+        time.set(2.);
+        tm.resume();
+        assert!(!tm.paused());
+        assert_eq!(tm.now(), 2.);
+        assert_eq!(tm.start_time, 0.);
+        assert_eq!(tm.wait, f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn repeated_pause_preserves_original_frozen_time() {
+        let (mut tm, time) = clock();
+        time.set(2.);
+        tm.pause();
+        time.set(5.);
+        tm.pause();
+        assert!(tm.paused());
+        assert_eq!(tm.now(), 2.);
+        time.set(8.);
+        tm.resume();
+        assert!(!tm.paused());
+        assert_eq!(tm.now(), 2.);
+        time.set(9.);
+        assert_eq!(tm.now(), 3.);
+    }
+
+    #[test]
+    fn repeated_resume_does_not_shift_running_time() {
+        let (mut tm, time) = clock();
+        time.set(2.);
+        tm.pause();
+        time.set(5.);
+        tm.resume();
+        let wait = tm.wait;
+        time.set(7.);
+        tm.resume();
+        assert_eq!(tm.start_time, 3.);
+        assert_eq!(tm.now(), 4.);
+        assert_eq!(tm.wait, wait);
+    }
+
+    #[test]
+    fn paused_seek_and_speed_survive_resume() {
+        let (mut tm, time) = clock();
+        tm.speed = 2.;
+        time.set(2.);
+        tm.pause();
+        tm.seek_to(10.);
+        time.set(8.);
+        tm.pause();
+        assert_eq!(tm.now(), 10.);
+        tm.resume();
+        assert_eq!(tm.now(), 10.);
+        time.set(9.);
+        assert_eq!(tm.now(), 12.);
     }
 }
