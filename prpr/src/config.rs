@@ -358,6 +358,7 @@ impl Config {
     /// Upload eligibility is separate; callers exclude practice and viewing modes.
     pub fn saves_run_record(&self) -> bool {
         !self.autoplay()
+            && (self.judgement_mode != JudgementMode::Custom || self.custom_judgement.effective().counts_local_score)
     }
 
     /// Keep malformed/legacy saved data away from the renderer.

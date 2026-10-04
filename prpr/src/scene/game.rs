@@ -316,10 +316,12 @@ impl GameScene {
         }
         let effects = std::mem::take(&mut chart.extra.global_effects);
         if config.fxaa {
-            chart
-                .extra
-                .effects
-                .push(Effect::new(0.0..f64::INFINITY, include_str!("fxaa.glsl"), Vec::new(), false).unwrap());
+            #[cfg(feature = "log")]
+            crate::log::startup_checkpoint("shader FXAA initialization");
+            match Effect::new(0.0..f64::INFINITY, include_str!("fxaa.glsl"), Vec::new(), false) {
+                Ok(effect) => chart.extra.effects.push(effect),
+                Err(err) => tracing::warn!(?err, "FXAA shader initialization failed; skipping anti-aliasing"),
+            }
         }
 
         if config.has_mod(Mods::NIGHTCORE) {
@@ -327,10 +329,12 @@ impl GameScene {
         }
 
         if config.has_mod(Mods::RAINBOW) {
-            chart
-                .extra
-                .effects
-                .push(Effect::new(0.0..f64::INFINITY, include_str!("rainbow.glsl"), Vec::new(), false).unwrap());
+            #[cfg(feature = "log")]
+            crate::log::startup_checkpoint("shader rainbow initialization");
+            match Effect::new(0.0..f64::INFINITY, include_str!("rainbow.glsl"), Vec::new(), false) {
+                Ok(effect) => chart.extra.effects.push(effect),
+                Err(err) => tracing::warn!(?err, "Rainbow shader initialization failed; skipping rainbow effect"),
+            }
         }
 
         let info_offset = info.offset;

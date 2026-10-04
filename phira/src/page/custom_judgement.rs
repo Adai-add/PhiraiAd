@@ -6,9 +6,15 @@ use macroquad::prelude::*;
 use prpr::{
     custom_judgement::{CustomJudgementConfig, MAX_SCHEMES},
     scene::{request_input, return_input, take_input},
-    ui::{Scroll, Ui},
+    ui::{Dialog, Scroll, Ui},
 };
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 pub struct CustomJudgementEditor {
     draft: CustomJudgementConfig,
@@ -16,6 +22,7 @@ pub struct CustomJudgementEditor {
     schemes_scroll: Scroll,
     done: bool,
     error: String,
+    confirmed_delete: Arc<AtomicUsize>,
 }
 impl CustomJudgementEditor {
     pub fn new() -> Self {
@@ -25,6 +32,7 @@ impl CustomJudgementEditor {
             schemes_scroll: Scroll::new(),
             done: false,
             error: String::new(),
+            confirmed_delete: Arc::new(AtomicUsize::new(0)),
         }
     }
     fn field(ui: &mut Ui, id: &str, rect: Rect, text: &mut String) -> bool {
@@ -62,6 +70,11 @@ impl Page for CustomJudgementEditor {
         "自定义判定".into()
     }
     fn update(&mut self, s: &mut SharedState) -> Result<()> {
+        let deletion = self.confirmed_delete.swap(0, Ordering::SeqCst);
+        if deletion != 0 {
+            self.draft.delete(deletion - 1);
+            self.persist();
+        }
         self.scroll.update(s.t);
         self.schemes_scroll.update(s.t);
         Ok(())
@@ -73,7 +86,6 @@ impl Page for CustomJudgementEditor {
         ui.abs_scope(|ui| {
             let top = ui.top;
             ui.fill_rect(Rect::new(-1., -top, 2., top * 2.), Color::from_rgba(19, 29, 39, 255));
-            ui.text("自定义判定").pos(-0.94, -top + 0.025).size(0.6).draw();
             if ui.button("custom_apply", Rect::new(0.66, -top + 0.025, 0.28, 0.065), "应用并返回") && self.persist() {
                 self.done = true;
             }
@@ -119,8 +131,12 @@ impl Page for CustomJudgementEditor {
                 self.scroll.y_scroller.reset();
                 self.error.clear();
             }
-            let y = -top + 0.205;
-            let height = (2. * top - 0.30).max(0.1);
+            if ui.button("custom_counts_score", Rect::new(-0.50, -top + 0.19, 0.70, 0.065),
+                if self.draft.current.counts_local_score { "此判定是否计成绩：是" } else { "此判定是否计成绩：否" }) {
+                self.draft.current.counts_local_score ^= true;
+            }
+            let y = -top + 0.285;
+            let height = (2. * top - 0.38).max(0.1);
             ui.scope(|ui| {
                 ui.dx(-0.94);
                 ui.dy(y);
@@ -149,97 +165,72 @@ impl Page for CustomJudgementEditor {
                     self.error.clear();
                 }
                 if let Some(i) = deleted {
-                    self.draft.delete(i);
-                    self.persist();
+                    let confirmed = Arc::clone(&self.confirmed_delete);
+                    Dialog::plain("删除方案", format!("是否确认删除“{}”？", self.draft.schemes[i].name))
+                        .buttons(vec!["取消".into(), "删除".into()])
+                        .listener(move |_, button| {
+                            if button == 1 { confirmed.store(i + 1, Ordering::SeqCst); }
+                            false
+                        }).show();
                 }
             });
             ui.scope(|ui| {
                 ui.dx(-0.50);
                 ui.dy(y);
-                ui.text("边界(ms)       判定档位                 ACC贡献 / 打击特效").size(0.32).draw();
-                ui.dy(0.055);
-                self.scroll.size((1.44, height - 0.055));
+                for (x, label) in [(0.12, "阈值"), (0.52, "档位"), (0.88, "ACC贡献"), (1.23, "打击特效颜色")] {
+                    ui.text(label).pos(x, 0.).anchor(0.5, 0.).size(0.30).draw();
+                }
+                ui.dy(0.075);
+                self.scroll.size((1.44, height - 0.075));
                 let draft = &mut self.draft;
                 let error = &mut self.error;
                 self.scroll.render(ui, |ui| {
                     let count = draft.current.bands.len();
                     for i in 0..count {
-                        let band = &mut draft.current.bands[i];
-                        ui.fill_rect(Rect::new(0., 0., 1.43, if i == 0 || i == count - 1 { 0.10 } else { 0.20 }), Color::from_rgba(30, 49, 62, 180));
-                        let mut boundary = format!("{}", draft.current.boundaries_ms[i]);
-                        if Self::field(ui, &format!("custom_boundary_{i}"), Rect::new(0.02, 0.02, 0.24, 0.06), &mut boundary) {
-                            match boundary.trim().parse::<f64>() {
-                                Ok(v) if v.is_finite() => {
-                                    draft.current.boundaries_ms[i] = v;
-                                    error.clear();
-                                }
+                        // Each threshold starts an interval; its band row sits below the divider.
+                        ui.fill_rect(Rect::new(0.26, 0.025, 1.17, 0.0015), Color::from_rgba(112, 129, 142, 255));
+                        let mut boundary = format!("{}ms", draft.current.boundaries_ms[i]);
+                        if Self::field(ui, &format!("custom_boundary_{i}"), Rect::new(0., 0., 0.24, 0.05), &mut boundary) {
+                            match boundary.trim().trim_end_matches("ms").trim().parse::<f64>() {
+                                Ok(v) if v.is_finite() => { draft.current.boundaries_ms[i] = v; error.clear(); }
                                 _ => *error = "请输入有效的毫秒数".into(),
                             }
                         }
-                        ui.text(&band.label)
-                            .pos(0.30, 0.032)
-                            .size(0.38)
-                            .color(Color::from_rgba(band.color[0], band.color[1], band.color[2], 255))
-                            .draw();
-                        let mut contribution = format!("{}", band.contribution);
-                        if Self::field(ui, &format!("custom_acc_{i}"), Rect::new(0.86, 0.02, 0.20, 0.06), &mut contribution) {
-                            match contribution.trim().parse::<f64>() {
-                                Ok(v) if v.is_finite() && v >= 0. => {
-                                    band.contribution = v;
-                                    error.clear();
-                                }
-                                _ => *error = "请输入非负的ACC贡献值".into(),
+                        let band = &mut draft.current.bands[i];
+                        ui.text(&band.label).pos(0.52, 0.066).anchor(0.5, 0.5).size(0.32).draw();
+                        let mut contribution = format!("{}%", band.contribution * 100.);
+                        if Self::field(ui, &format!("custom_acc_{i}"), Rect::new(0.79, 0.042, 0.18, 0.05), &mut contribution) {
+                            match contribution.trim().trim_end_matches('%').trim().parse::<f64>() {
+                                Ok(v) if v.is_finite() && v >= 0. => { band.contribution = v / 100.; error.clear(); }
+                                _ => *error = "请输入非负的ACC百分比".into(),
                             }
                         }
                         if i != 0 && i != count - 1 {
                             let mut color = format!("#{:02X}{:02X}{:02X}{:02X}", band.color[0], band.color[1], band.color[2], band.color[3]);
-                            ui.text("颜色RGBA").pos(0.02, 0.122).size(0.30).draw();
-                            if Self::field(ui, &format!("custom_color_{i}"), Rect::new(0.24, 0.11, 0.29, 0.06), &mut color) {
+                            if Self::field(ui, &format!("custom_color_{i}"), Rect::new(1.10, 0.042, 0.33, 0.05), &mut color) {
                                 let code = color.trim().trim_start_matches('#');
                                 match u32::from_str_radix(code, 16) {
                                     Ok(v) if code.len() == 6 || code.len() == 8 => {
-                                        let v = if code.len() == 6 { (v << 8) | 255 } else { v };
-                                        band.color = v.to_be_bytes();
+                                        band.color = (if code.len() == 6 { (v << 8) | 255 } else { v }).to_be_bytes();
                                         error.clear();
                                     }
                                     _ => *error = "颜色请输入6位RGB或8位RGBA十六进制".into(),
                                 }
                             }
-                            ui.fill_rect(
-                                Rect::new(0.56, 0.12, 0.045, 0.04),
-                                Color::from_rgba(band.color[0], band.color[1], band.color[2], band.color[3]),
-                            );
-                            ui.text("大小×").pos(0.65, 0.122).size(0.30).draw();
-                            let mut size = format!("{}", band.effect_size);
-                            if Self::field(ui, &format!("custom_effect_size_{i}"), Rect::new(0.80, 0.11, 0.18, 0.06), &mut size) {
-                                match size.trim().parse::<f32>() {
-                                    Ok(v) if v.is_finite() && v > 0. => {
-                                        band.effect_size = v;
-                                        error.clear();
-                                    }
-                                    _ => *error = "特效大小必须大于0".into(),
-                                }
-                            }
-                            if ui.button(
-                                &format!("custom_effect_enabled_{i}"),
-                                Rect::new(1.05, 0.11, 0.35, 0.06),
-                                if band.effect_enabled { "特效：开启" } else { "特效：关闭" },
-                            ) {
-                                band.effect_enabled ^= true;
-                            }
+                            ui.fill_rect(Rect::new(1.025, 0.052, 0.045, 0.03), Color::from_rgba(band.color[0], band.color[1], band.color[2], band.color[3]));
                         } else {
-                            ui.text("无打击特效").pos(1.09, 0.038).size(0.30).draw();
+                            ui.text("—").pos(1.23, 0.066).anchor(0.5, 0.5).size(0.32).draw();
                         }
-                        ui.dy(if i == 0 || i == count - 1 { 0.115 } else { 0.215 });
+                        ui.dy(0.10);
                     }
-                    (1.44, 0.23 + (count - 2) as f32 * 0.215)
+                    (1.44, count as f32 * 0.10)
                 });
             });
             let validation = self.draft.current.validate().err();
             ui.text(if !self.error.is_empty() {
                 self.error.as_str()
             } else {
-                validation.as_deref().unwrap_or("提前为正，延后为负；边界严格递减。ACC = 总贡献 ÷ 音符数")
+                validation.as_deref().unwrap_or("提前为正，延后为负；边界递减。ACC = 总贡献 ÷ 音符数")
             })
             .pos(-0.94, top - 0.07)
             .size(0.30)

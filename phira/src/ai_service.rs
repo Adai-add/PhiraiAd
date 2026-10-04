@@ -4,7 +4,7 @@ use crate::ai_model::{
     index::{chart_root, Index},
     Predictor,
 };
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
@@ -402,7 +402,8 @@ fn stage_builtin(path: &str, root: &Path) -> Result<()> {
     miniquad::fs::load_file(&asset, move |r| {
         let _ = tx.send(r);
     });
-    let bytes = crate::resolve_res_data(rx.recv_timeout(Duration::from_secs(5))?.map_err(|e| anyhow::anyhow!("{e:?}"))?);
+    let bytes = crate::resolve_res_data(rx.recv_timeout(Duration::from_secs(5))?.map_err(|e| anyhow::anyhow!("{e:?}"))?)
+        .with_context(|| format!("failed to decode AI chart resource: {asset}"))?;
     std::fs::create_dir_all(root)?;
     let name = "ai-chart-source";
     let file = root.join(name);

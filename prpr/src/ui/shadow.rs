@@ -18,21 +18,37 @@ fn alpha_blend_material_params(uniforms: Vec<(String, UniformType)>) -> Material
     }
 }
 
-static SHADOW_MATERIAL: Lazy<Material> =
-    Lazy::new(|| load_material(shader::VERTEX, shader::SHADOW_FRAGMENT, alpha_blend_material_params(ShadowConfig::uniforms())).unwrap());
+// Cache failure too: unsupported shaders should not panic or retry every frame.
+fn load_ui_material(name: &str, fragment: &str, params: MaterialParams) -> Option<Material> {
+    #[cfg(feature = "log")]
+    crate::log::startup_checkpoint(match name {
+        "shadow" => "shader shadow initialization",
+        "rounded rectangle" => "shader rounded rectangle initialization",
+        _ => "shader sector initialization",
+    });
+    match load_material(shader::VERTEX, fragment, params) {
+        Ok(material) => Some(material),
+        Err(err) => {
+            tracing::warn!("failed to initialize {} material; disabling its effect: {:?}", name, err);
+            None
+        }
+    }
+}
 
-static RR_MATERIAL: Lazy<Material> = Lazy::new(|| {
-    load_material(
-        shader::VERTEX,
+static SHADOW_MATERIAL: Lazy<Option<Material>> =
+    Lazy::new(|| load_ui_material("shadow", shader::SHADOW_FRAGMENT, alpha_blend_material_params(ShadowConfig::uniforms())));
+
+static RR_MATERIAL: Lazy<Option<Material>> = Lazy::new(|| {
+    load_ui_material(
+        "rounded rectangle",
         shader::RR_FRAGMENT,
         alpha_blend_material_params(vec![("rect".to_owned(), UniformType::Float4), ("radius".to_owned(), UniformType::Float1)]),
     )
-    .unwrap()
 });
 
-static SECTOR_MATERIAL: Lazy<Material> = Lazy::new(|| {
-    load_material(
-        shader::VERTEX,
+static SECTOR_MATERIAL: Lazy<Option<Material>> = Lazy::new(|| {
+    load_ui_material(
+        "sector",
         shader::SECTOR_FRAGMENT,
         alpha_blend_material_params(vec![
             ("center".to_owned(), UniformType::Float2),
@@ -40,7 +56,6 @@ static SECTOR_MATERIAL: Lazy<Material> = Lazy::new(|| {
             ("blur".to_owned(), UniformType::Float2),
         ]),
     )
-    .unwrap()
 });
 
 #[derive(Clone, Copy)]
@@ -78,7 +93,9 @@ impl ShadowConfig {
 
 pub fn rounded_rect_shadow(ui: &mut Ui, r: Rect, config: &ShadowConfig) {
     // r.y += elevation * 0.5;
-    let mat = *SHADOW_MATERIAL;
+    let Some(mat) = *SHADOW_MATERIAL else {
+        return;
+    };
     let gr = ui.rect_to_global(r);
     mat.set_uniform("rect", vec4(gr.x, gr.y, gr.right(), gr.bottom()));
     ShadowConfig {
@@ -93,7 +110,9 @@ pub fn rounded_rect_shadow(ui: &mut Ui, r: Rect, config: &ShadowConfig) {
 }
 
 pub fn clip_rounded_rect<R>(ui: &mut Ui, r: Rect, radius: f32, f: impl FnOnce(&mut Ui) -> R) -> R {
-    let mat = *RR_MATERIAL;
+    let Some(mat) = *RR_MATERIAL else {
+        return f(ui);
+    };
     let gr = ui.rect_to_global(r);
     mat.set_uniform("rect", vec4(gr.x, gr.y, gr.right(), gr.bottom()));
     mat.set_uniform("radius", radius);
@@ -104,7 +123,9 @@ pub fn clip_rounded_rect<R>(ui: &mut Ui, r: Rect, radius: f32, f: impl FnOnce(&m
 }
 
 pub fn clip_sector<R>(ui: &mut Ui, ct: Vec2, start: f32, end: f32, f: impl FnOnce(&mut Ui) -> R) -> R {
-    let mat = *SECTOR_MATERIAL;
+    let Some(mat) = *SECTOR_MATERIAL else {
+        return f(ui);
+    };
     mat.set_uniform("center", ui.to_global((ct.x, ct.y)));
     mat.set_uniform("angle", vec2(start, end));
     let t = -end.sin();

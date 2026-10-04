@@ -88,13 +88,13 @@ impl FileSystem for AssetsChartFileSystem {
         }
         use crate::load_res;
         if path == ":music" {
-            return Ok(load_res(&format!("res/song/{}/music", self.0)).await);
+            return load_res(&format!("res/song/{}/music", self.0)).await;
         }
         if path == ":illu" {
-            return Ok(load_res(&format!("res/song/{}/cover", self.0)).await);
+            return load_res(&format!("res/song/{}/cover", self.0)).await;
         }
         if path == ":chart" {
-            return Ok(load_res(&format!("res/song/{}/{}", self.0, self.1)).await);
+            return load_res(&format!("res/song/{}/{}", self.0, self.1)).await;
         }
         bail!("not found");
     }

@@ -44,7 +44,7 @@ mod tags;
 mod threed;
 mod uml;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use data::Data;
 use macroquad::prelude::*;
 use prpr::{
@@ -83,8 +83,9 @@ pub static mut DATA: Option<Data> = None;
 use napi_derive_ohos::napi;
 
 #[cfg(closed)]
-pub fn resolve_res_data(bytes: Vec<u8>) -> Vec<u8> {
-    inner::resolve_data(bytes)
+pub fn resolve_res_data(bytes: Vec<u8>) -> Result<Vec<u8>> {
+    // The closed decoder is external; preserve its API behind this Result wrapper.
+    Ok(inner::resolve_data(bytes))
 }
 
 #[cfg(not(closed))]
@@ -112,25 +113,42 @@ fn decode_resource_blocks(bytes: &mut [u8]) {
 }
 
 #[cfg(not(closed))]
-pub fn resolve_res_data(mut bytes: Vec<u8>) -> Vec<u8> {
+pub fn resolve_res_data(mut bytes: Vec<u8>) -> Result<Vec<u8>> {
+    anyhow::ensure!(!bytes.is_empty(), "empty bundled resource");
+    anyhow::ensure!(bytes.len() % 8 == 0, "invalid bundled resource length: {}", bytes.len());
     decode_resource_blocks(&mut bytes);
-    let remainder = *bytes.last().expect("empty bundled resource") as usize;
-    assert!(remainder < 8, "invalid bundled resource padding");
+    let remainder = bytes[bytes.len() - 1] as usize;
+    anyhow::ensure!(remainder < 8, "invalid bundled resource padding: {remainder}");
     let padding = 8 - remainder;
-    assert!(bytes.len() >= padding && bytes[bytes.len() - padding..].iter().all(|&it| it as usize == remainder));
+    anyhow::ensure!(
+        bytes.len() >= padding && bytes[bytes.len() - padding..].iter().all(|&it| it as usize == remainder),
+        "invalid bundled resource padding bytes"
+    );
     bytes.truncate(bytes.len() - padding);
-    zstd::decode_all(bytes.as_slice()).expect("failed to decode bundled resource")
+    zstd::decode_all(bytes.as_slice()).context("failed to decompress bundled resource")
 }
 
-pub async fn load_res(name: &str) -> Vec<u8> {
-    resolve_res_data(load_file(name).await.unwrap())
+pub async fn load_res(name: &str) -> Result<Vec<u8>> {
+    let result = async {
+        let bytes = load_file(name).await.with_context(|| format!("failed to read bundled resource: {name}"))?;
+        resolve_res_data(bytes).with_context(|| format!("failed to decode bundled resource: {name}"))
+    }
+    .await;
+    if let Err(err) = &result {
+        error!(resource = name, ?err, "bundled resource loading failed");
+    }
+    result
 }
 
 #[allow(unused)]
-pub async fn load_res_tex(name: &str) -> SafeTexture {
-    let bytes = load_res(name).await;
-    let image = image::load_from_memory(&bytes).unwrap();
-    image.into()
+pub async fn load_res_tex(name: &str) -> Result<SafeTexture> {
+    let bytes = load_res(name).await?;
+    let image = image::load_from_memory(&bytes).with_context(|| format!("failed to decode bundled image: {name}"))
+        .map_err(|err| {
+            error!(resource = name, ?err, "bundled image loading failed");
+            err
+        })?;
+    Ok(image.into())
 }
 
 #[cfg(all(test, not(closed)))]
@@ -145,8 +163,23 @@ mod bundled_resource_tests {
     }
 
     #[test]
+    fn rejects_empty_and_incomplete_resources() {
+        assert!(resolve_res_data(Vec::new()).unwrap_err().to_string().contains("empty"));
+        assert!(resolve_res_data(vec![0; 7]).unwrap_err().to_string().contains("length"));
+    }
+
+    #[test]
+    fn rejects_invalid_padding_and_compressed_data() {
+        // Encoded blocks decode to eight 8s (invalid remainder), invalid padding,
+        // and eight 1s (valid padding but invalid compressed payload), respectively.
+        assert!(resolve_res_data(vec![8, 16, 32, 32, 16, 32, 16, 64]).unwrap_err().to_string().contains("padding"));
+        assert!(resolve_res_data(vec![0, 0, 0, 2, 0, 0, 0, 3]).is_err());
+        assert!(resolve_res_data(vec![1, 2, 4, 4, 2, 4, 2, 8]).unwrap_err().to_string().contains("decompress"));
+    }
+
+    #[test]
     fn resolves_bundled_character_image() {
-        let decoded = resolve_res_data(include_bytes!("../../assets/res/shee.char").to_vec());
+        let decoded = resolve_res_data(include_bytes!("../../assets/res/shee.char").to_vec()).unwrap();
         assert_eq!(&decoded[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(decoded.len(), 119_952);
     }
@@ -245,6 +278,7 @@ mod dir {
 }
 
 async fn the_main() -> Result<()> {
+    log::startup_checkpoint("01 logging");
     log::register();
     #[cfg(target_env = "ohos")]
     {
@@ -253,7 +287,9 @@ async fn the_main() -> Result<()> {
         prpr::core::DPI_VALUE.store(250, std::sync::atomic::Ordering::Relaxed);
     };
 
+    log::startup_checkpoint("02 assets directory");
     init_assets();
+    log::startup_checkpoint("03 Tokio runtime");
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -262,6 +298,7 @@ async fn the_main() -> Result<()> {
         .unwrap();
     let _guard = rt.enter();
 
+    log::startup_checkpoint("04 platform data directory");
     #[cfg(target_os = "ios")]
     {
         use objc2_foundation::{NSSearchPathDirectory, NSSearchPathDomainMask, NSSearchPathForDirectoriesInDomains};
@@ -272,6 +309,7 @@ async fn the_main() -> Result<()> {
         *CACHE_DIR.lock().unwrap() = Some("Caches".to_owned());
     }
 
+    log::startup_checkpoint("05 saved data initialization");
     let dir = dir::root()?;
     let mut data: Data = std::fs::read_to_string(format!("{dir}/data.json"))
         .map_err(anyhow::Error::new)
@@ -306,12 +344,14 @@ async fn the_main() -> Result<()> {
         .display_mut()
         .set_pause_resume_listener(on_pause_resume);
 
+    log::startup_checkpoint("06 fonts");
     let pgr_font = FontArc::try_from_vec(load_file("phigros.ttf").await?)?;
     PGR_FONT.with(move |it| *it.borrow_mut() = Some(TextPainter::new(pgr_font, None)));
 
     let font = FontArc::try_from_vec(load_file("font.ttf").await?)?;
     let mut painter = TextPainter::new(font.clone(), None);
 
+    log::startup_checkpoint("07 MainScene construction");
     let mut main = Main::new(Box::new(MainScene::new(font).await?), TimeManager::default(), None).await?;
 
     let tm = TimeManager::default();
@@ -322,6 +362,7 @@ async fn the_main() -> Result<()> {
     let mut last_frame_start = f32::NAN;
     let mut fps_time_sum = 0.;
 
+    let mut first_frame = true;
     'app: loop {
         if main.paused() {
             match rx.recv() {
@@ -344,8 +385,18 @@ async fn the_main() -> Result<()> {
         }
         last_frame_start = frame_start as f32;
         let res = || -> Result<()> {
+            if first_frame {
+                log::startup_checkpoint("12 first frame update");
+            }
             main.update()?;
+            if first_frame {
+                log::startup_checkpoint("13 first frame render");
+            }
             main.render(&mut painter)?;
+            if first_frame {
+                log::startup_checkpoint("14 first frame rendered");
+            }
+            first_frame = false;
             if let Ok(paused) = rx.try_recv() {
                 if paused {
                     main.pause()?;
@@ -406,6 +457,8 @@ fn build_global_window_conf() -> Conf {
 
 #[no_mangle]
 pub extern "C" fn quad_main() {
+    log::install_ios_diagnostics();
+    log::startup_checkpoint("00 window creation");
     macroquad::Window::from_config(build_global_window_conf(), async {
         if let Err(err) = the_main().await {
             error!(?err, "global error");

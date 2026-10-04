@@ -39,6 +39,7 @@ impl Default for Band {
 #[serde(default, rename_all = "camelCase")]
 pub struct Scheme {
     pub name: String,
+    pub counts_local_score: bool,
     pub boundaries_ms: Vec<f64>,
     pub bands: Vec<Band>,
 }
@@ -66,6 +67,7 @@ impl Scheme {
         };
         Self {
             name: "新方案".into(),
+            counts_local_score: false,
             boundaries_ms: boundary_indices.iter().map(|&i| BOUNDARIES[i]).collect(),
             bands: indices
                 .iter()
@@ -133,6 +135,7 @@ impl Scheme {
         }
         let mut next = Self::new(count);
         next.name = self.name.clone();
+        next.counts_local_score = self.counts_local_score;
         for band in &mut next.bands {
             if let Some(old) = self.bands.iter().find(|x| x.label == band.label) {
                 *band = old.clone();
@@ -208,6 +211,27 @@ impl CustomJudgementConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_score_permission_is_opt_in_and_survives_scheme_changes() {
+        use crate::config::{Config, JudgementMode};
+        let mut config = Config::default();
+        config.judgement_mode = JudgementMode::Custom;
+        assert!(!config.saves_run_record());
+        let old: Scheme = serde_json::from_str(r#"{"name":"旧方案"}"#).unwrap();
+        assert!(!old.counts_local_score);
+        config.custom_judgement.current.counts_local_score = true;
+        config.custom_judgement.current.change_count(9);
+        config.custom_judgement.save(true).unwrap();
+        config.custom_judgement.current = Scheme::default();
+        config.custom_judgement.select(0);
+        assert!(config.saves_run_record());
+        assert!(config.blocks_score_upload());
+        let restored: Config = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert!(restored.saves_run_record());
+        config.judgement_mode = JudgementMode::Phira;
+        config.custom_judgement.current.counts_local_score = false;
+        assert!(config.saves_run_record());
+    }
     #[test]
     fn old_config_migrates_and_custom_config_round_trips() {
         let mut c: crate::config::Config = serde_json::from_str("{}").unwrap();

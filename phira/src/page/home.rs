@@ -116,9 +116,12 @@ impl HomePage {
             None
         } else if let Some(u) = &get_data().me {
             UserManager::request(u.id);
-            Some(Task::new(async {
+            // Own the token before scheduling: session data can change while the task waits.
+            let refresh = get_data().tokens.as_ref().map(|(_, refresh)| refresh.clone());
+            Some(Task::new(async move {
+                let refresh = refresh.context("Saved login has no refresh token; please log in again")?;
                 Client::login(LoginParams::RefreshToken {
-                    token: &get_data().tokens.as_ref().unwrap().1,
+                    token: &refresh,
                     cancel_delete_request: false,
                 })
                 .await?;
@@ -255,13 +258,13 @@ impl HomePage {
         if self.character.illust == "@" {
             let id = self.character.id.clone();
             self.char_illu_task =
-                Some(Task::new(async move { Ok(image::load_from_memory(&crate::resolve_res_data(load_file(&format!("res/{id}.char")).await?))?) }));
+                Some(Task::new(async move { Ok(image::load_from_memory(&crate::load_res(&format!("res/{id}.char")).await?)?) }));
         } else {
             let file = crate::page::File {
                 url: self.character.illust.clone(),
             };
             self.char_illu_task =
-                Some(Task::new(async move { Ok(image::load_from_memory(&crate::resolve_res_data(file.fetch().await?.to_vec()))?) }));
+                Some(Task::new(async move { Ok(image::load_from_memory(&crate::resolve_res_data(file.fetch().await?.to_vec()).context("failed to decode downloaded character illustration")?)?) }));
         }
     }
 

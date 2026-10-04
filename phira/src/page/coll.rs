@@ -58,7 +58,7 @@ impl CollectionPage {
                     use crate::resource::L10N_LOCAL;
                     vec![CollectionItem {
                         id: "c1".to_owned(),
-                        illu: Illustration::from_done(load_res_tex("res/chap/c1/cover").await),
+                        illu: Illustration::from_done(load_res_tex("res/chap/c1/cover").await?),
                         title: rtl!("chap-c1").into_owned(),
                         btn: RectButton::new(),
                     }]

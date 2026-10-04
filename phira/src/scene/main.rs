@@ -103,10 +103,12 @@ enum ImportChart {
 impl MainScene {
     // shall be call exactly once
     pub async fn new(fallback: FontArc) -> Result<Self> {
+        prpr::log::startup_checkpoint("08 UI sounds and textures");
         Self::init().await?;
 
+        prpr::log::startup_checkpoint("09 BGM read/decode/audio");
         let bgm = {
-            let bgm_clip = AudioClip::new(crate::load_res("res/bgm").await)?;
+            let bgm_clip = AudioClip::new(crate::load_res("res/bgm").await?)?;
             Some(UI_AUDIO.with(|it| {
                 it.borrow_mut().create_music(
                     bgm_clip,
@@ -119,7 +121,9 @@ impl MainScene {
                 )
             })?)
         };
+        prpr::log::startup_checkpoint("10 shared state and icons");
         let mut sf = Self::new_inner(bgm, fallback).await?;
+        prpr::log::startup_checkpoint("11 HomePage construction");
         sf.pages.push(Box::new(HomePage::new(Arc::clone(&sf.icons)).await?));
         Ok(sf)
     }
@@ -866,6 +870,7 @@ impl Scene for MainScene {
 }
 
 static STRIPE_MATERIAL: Lazy<Option<Material>> = Lazy::new(|| {
+    prpr::log::startup_checkpoint("shader stripe initialization");
     match load_material(
         shader::VERTEX,
         shader::FRAGMENT,
