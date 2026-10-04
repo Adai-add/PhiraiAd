@@ -123,6 +123,24 @@ pub fn startup_checkpoint(stage: &'static str) {
     let _ = stage;
 }
 
+/// Lifecycle and frame details; ordinary records do not force disk sync.
+pub fn diagnostic_event(message: &str) {
+    #[cfg(target_os = "ios")]
+    ios_diagnostics::record_inner(message, false);
+    #[cfg(not(target_os = "ios"))]
+    let _ = message;
+}
+
+/// Trace a bounded number of early frames without logging every later frame.
+pub fn frame_checkpoint(frame: usize, phase: &'static str) {
+    #[cfg(target_os = "ios")]
+    if frame < 10 {
+        diagnostic_event(&format!("FRAME {frame} {phase}"));
+    }
+    #[cfg(not(target_os = "ios"))]
+    let _ = (frame, phase);
+}
+
 /// Install before Window creation so the first Rust panic is preserved before
 /// a C/Objective-C callback turns it into panic_cannot_unwind.
 pub fn install_ios_diagnostics() {
@@ -181,7 +199,7 @@ mod ios_diagnostics {
         lines: VecDeque::new(),
         buffer: [0; 8192],
     });
-    static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+    static LOG_PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     static FILE_LOCK: Mutex<()> = Mutex::new(());
     static INSTALL: Once = Once::new();
     static FIRST_MAIN_PANIC: AtomicBool = AtomicBool::new(false);
@@ -201,20 +219,28 @@ mod ios_diagnostics {
         }
     }
 
-    fn append_file(message: &str) {
-        let Some(path) = LOG_PATH.get() else { return };
+    fn append_file(message: &str, durable: bool) {
+        let Some(paths) = LOG_PATHS.get() else { return };
         let Ok(_guard) = FILE_LOCK.try_lock() else { return };
-        // Bound disk usage; retain the preceding log as a sibling file.
-        if std::fs::metadata(path).map(|m| m.len() > 2 * 1024 * 1024).unwrap_or(false) {
-            let _ = std::fs::rename(path, path.with_extension("previous.log"));
-        }
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{message}");
-            let _ = file.sync_data();
+        for path in paths {
+            // Bound disk usage; retain the preceding log as a sibling file.
+            if std::fs::metadata(path).map(|m| m.len() > 2 * 1024 * 1024).unwrap_or(false) {
+                let _ = std::fs::rename(path, path.with_extension("previous.log"));
+            }
+            if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(file, "{message}");
+                // Each write reaches the kernel when the file is closed. Force
+                // disk sync for errors/panic, not every early-frame breadcrumb.
+                if durable { let _ = file.sync_data(); }
+            }
         }
     }
 
     pub(super) fn record(message: &str) {
+        record_inner(message, true);
+    }
+
+    pub(super) fn record_inner(message: &str, durable: bool) {
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|t| t.as_millis()).unwrap_or(0);
         let mut message = format!("{timestamp} {message}").replace('\0', "?");
         // Bound individual errors without splitting UTF-8.
@@ -233,16 +259,24 @@ mod ios_diagnostics {
             history.buffer[snapshot.len()] = 0;
             PHIRAIAD_CRASH_ANNOTATIONS.message2.store(history.buffer.as_ptr() as u64, Ordering::Release);
         }
-        append_file(&message);
+        append_file(&message, durable);
     }
 
     pub(super) fn install() {
         INSTALL.call_once(|| {
-            let path = std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join("Library").join("PhiraiAd-ios-diagnostic.log"))
-                .unwrap_or_else(|| std::env::temp_dir().join("PhiraiAd-ios-diagnostic.log"));
-            if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
-            let _ = LOG_PATH.set(path);
+            let mut paths = Vec::new();
+            if let Some(home) = std::env::var_os("HOME") {
+                let home = PathBuf::from(home);
+                for directory in ["Library", "Documents"] {
+                    let parent = home.join(directory);
+                    if std::fs::create_dir_all(&parent).is_ok() {
+                        paths.push(parent.join("PhiraiAd-ios-diagnostic.log"));
+                    }
+                }
+            }
+            // Keep a temp fallback if the sandbox paths cannot be opened.
+            paths.push(std::env::temp_dir().join("PhiraiAd-ios-diagnostic.log"));
+            let _ = LOG_PATHS.set(paths);
             // iOS uses our hook instead of the default thread-name/backtrace
             // hook, which can re-enter thread-local state during FFI cleanup.
             std::panic::set_hook(Box::new(|info| {

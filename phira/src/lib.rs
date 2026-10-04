@@ -363,17 +363,21 @@ async fn the_main() -> Result<()> {
     let mut fps_time_sum = 0.;
 
     let mut first_frame = true;
+    let mut diagnostic_frame = 0usize;
     'app: loop {
         if main.paused() {
             match rx.recv() {
                 Ok(false) => {
+                    log::diagnostic_event("LIFECYCLE resume from paused wait begin");
                     main.resume()?;
+                    log::diagnostic_event("LIFECYCLE resume from paused wait complete");
                 }
                 Ok(true) => {}
                 Err(_) => break 'app,
             }
         }
 
+        log::frame_checkpoint(diagnostic_frame, "update begin");
         let frame_start = tm.real_time();
         if !last_frame_start.is_nan() {
             if fps_times.len() == FPS_BUF_SIZE {
@@ -389,22 +393,30 @@ async fn the_main() -> Result<()> {
                 log::startup_checkpoint("12 first frame update");
             }
             main.update()?;
+            log::frame_checkpoint(diagnostic_frame, "update complete; render begin");
             if first_frame {
                 log::startup_checkpoint("13 first frame render");
             }
             main.render(&mut painter)?;
+            log::frame_checkpoint(diagnostic_frame, "render commands queued");
             if first_frame {
                 log::startup_checkpoint("14 first frame rendered");
             }
             first_frame = false;
             if let Ok(paused) = rx.try_recv() {
                 if paused {
+                    log::diagnostic_event("LIFECYCLE pause apply begin");
                     main.pause()?;
+                    log::diagnostic_event("LIFECYCLE pause apply complete");
                 } else {
+                    log::diagnostic_event("LIFECYCLE resume apply begin");
                     main.resume()?;
+                    log::diagnostic_event("LIFECYCLE resume apply complete");
                 }
             }
+            log::frame_checkpoint(diagnostic_frame, "texture cleanup begin");
             prpr::ext::flush_pending_texture_deletions();
+            log::frame_checkpoint(diagnostic_frame, "texture cleanup complete");
             Ok(())
         }();
         if let Err(err) = res {
@@ -429,7 +441,10 @@ async fn the_main() -> Result<()> {
 
         // While backgrounded the scene is paused; the blocking `recv_timeout`
         // above already parks this thread, so nothing extra is needed here.
+        log::frame_checkpoint(diagnostic_frame, "next_frame begin");
         next_frame().await;
+        log::frame_checkpoint(diagnostic_frame, "next_frame resumed; prior frame submitted");
+        diagnostic_frame = diagnostic_frame.saturating_add(1);
     }
     Ok(())
 }
@@ -468,6 +483,7 @@ pub extern "C" fn quad_main() {
 }
 
 fn on_pause_resume(pause: bool) {
+    log::diagnostic_event(if pause { "LIFECYCLE native pause received" } else { "LIFECYCLE native resume received" });
     if let Some(tx) = MESSAGES_TX.lock().unwrap().as_mut() {
         let _ = tx.send(pause);
     }

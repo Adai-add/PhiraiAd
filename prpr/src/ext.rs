@@ -94,6 +94,13 @@ static PENDING_TEXTURE_DELETIONS: Lazy<Mutex<Vec<Texture2D>>> = Lazy::new(|| Mut
 /// called periodically from the main (rendering) thread.
 pub fn flush_pending_texture_deletions() {
     let textures = std::mem::take(&mut *PENDING_TEXTURE_DELETIONS.lock().unwrap());
+    if textures.is_empty() {
+        return;
+    }
+    // Main-thread ownership is not enough: macroquad batches draw calls until
+    // end_frame, and those calls may still refer to a queued texture. Submit
+    // the batches before deleting GL objects (also covers phira-monitor).
+    unsafe { get_internal_gl() }.flush();
     for texture in textures {
         texture.delete();
     }
