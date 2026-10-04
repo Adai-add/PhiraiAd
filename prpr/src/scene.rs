@@ -249,56 +249,102 @@ pub fn request_file(id: impl Into<String>) {
                     // SAFETY: The signature is correct.
                     #[unsafe(method(documentPicker:didPickDocumentsAtURLs:))]
                     fn did_pick_documents_at_urls(&self, controller: &UIDocumentPickerViewController, urls: &NSArray<NSURL>) {
-                        use objc2_foundation::{NSData, NSDataReadingOptions, NSTemporaryDirectory};
+                        #[cfg(feature = "log")]
+                        crate::log::startup_checkpoint("file picker selection callback");
+                        self.finish_selection(controller, urls.firstObject().as_deref());
+                    }
 
-                        let url = urls.firstObject().unwrap();
-                        let need_close = unsafe { url.startAccessingSecurityScopedResource() };
+                    // SAFETY: The signature matches the legacy delegate method.
+                    #[allow(deprecated)]
+                    #[unsafe(method(documentPicker:didPickDocumentAtURL:))]
+                    fn did_pick_document_at_url(&self, controller: &UIDocumentPickerViewController, url: &NSURL) {
+                        #[cfg(feature = "log")]
+                        crate::log::startup_checkpoint("file picker legacy selection callback");
+                        self.finish_selection(controller, Some(url));
+                    }
 
-                        let data = match NSData::dataWithContentsOfURL_options_error(&url, NSDataReadingOptions::Uncached) {
-                            Ok(data) => data,
-                            Err(err) => {
-                                let message = err.localizedDescription().to_string();
-                                show_error(Error::msg(message).context(ttl!("read-file-failed")));
-                                return;
-                            }
-                        };
-                        if need_close {
-                            unsafe { url.stopAccessingSecurityScopedResource() };
-                        }
-
-                        let dir = NSTemporaryDirectory();
-                        let path = format!("{}{}", dir, uuid::Uuid::new_v4());
-                        data.writeToFile_atomically(&NSString::from_str(&path), true);
-                        CHOSEN_FILE.lock().unwrap().1 = Some(path);
+                    // SAFETY: The signature matches UIDocumentPickerDelegate.
+                    #[unsafe(method(documentPickerWasCancelled:))]
+                    fn document_picker_was_cancelled(&self, controller: &UIDocumentPickerViewController) {
+                        *CHOSEN_FILE.lock().unwrap_or_else(|err| err.into_inner()) = (None, None);
+                        #[cfg(feature = "log")]
+                        crate::log::startup_checkpoint("file picker cancelled");
+                        controller.dismissViewControllerAnimated_completion(true, None);
                     }
                 }
             }
 
             impl PickerDelegate {
+                fn finish_selection(&self, controller: &UIDocumentPickerViewController, url: Option<&NSURL>) {
+                    // Import/asCopy mode returns a local file in our sandbox.
+                    // Hand its path to the existing importer; do not synchronously
+                    // read/copy an entire archive in a UIKit callback.
+                    let result = (|| -> Result<String> {
+                        let url = url.ok_or_else(|| Error::msg("The document picker returned no file"))?;
+                        anyhow::ensure!(url.isFileURL(), "The document picker returned a non-file URL");
+                        let path = url.path().ok_or_else(|| Error::msg("The selected document has no local path"))?.to_string();
+                        anyhow::ensure!(std::path::Path::new(&path).is_absolute(), "The selected document path is not absolute");
+                        Ok(path)
+                    })();
+
+                    // Always dismiss, including empty/invalid results. Error
+                    // dialogs are rendered by the app after UIKit returns.
+                    controller.dismissViewControllerAnimated_completion(true, None);
+                    match result {
+                        Ok(path) => {
+                            let mut chosen = CHOSEN_FILE.lock().unwrap_or_else(|err| err.into_inner());
+                            if chosen.0.is_some() {
+                                chosen.1 = Some(path);
+                                #[cfg(feature = "log")]
+                                crate::log::startup_checkpoint("file picker local copy queued");
+                            }
+                        }
+                        Err(err) => {
+                            *CHOSEN_FILE.lock().unwrap_or_else(|err| err.into_inner()) = (None, None);
+                            show_error(err.context(ttl!("read-file-failed")));
+                        }
+                    }
+                }
+
                 fn new(mtm: MainThreadMarker) -> Retained<Self> {
                     let this = Self::alloc(mtm).set_ivars(());
                     unsafe { objc2::msg_send![super(this), init] }
                 }
             }
 
-            let mtm = MainThreadMarker::new().unwrap();
+            let Some(mtm) = MainThreadMarker::new() else {
+                *CHOSEN_FILE.lock().unwrap_or_else(|err| err.into_inner()) = (None, None);
+                warn!("iOS file picker must be presented on the main thread");
+                return;
+            };
+            let Some(presenter) = inputbox::backend::IOS::get_top_view_controller(mtm) else {
+                *CHOSEN_FILE.lock().unwrap_or_else(|err| err.into_inner()) = (None, None);
+                show_error(Error::msg("Cannot find a view controller for the file picker"));
+                return;
+            };
+            #[cfg(feature = "log")]
+            crate::log::startup_checkpoint("file picker presenting import copy");
 
             let picker = UIDocumentPickerViewController::alloc(mtm);
             let picker = if available!(ios = 14.0.0) {
                 use objc2_uniform_type_identifiers::UTType;
 
-                let ext = |e: &str| UTType::typeWithFilenameExtension(&NSString::from_str(e)).unwrap();
-                let types = NSArray::from_retained_slice(&[
-                    ext("zip"),
-                    ext("pez"),
-                    ext("jpg"),
-                    ext("png"),
-                    ext("jpeg"),
-                    ext("json"),
-                    ext("mp3"),
-                    ext("ogg"),
-                ]);
-                UIDocumentPickerViewController::initForOpeningContentTypes(picker, &types)
+                // Some providers do not recognize custom extensions such as
+                // .pez. Include public.data so those files remain selectable.
+                let mut types: Vec<_> = ["zip", "pez", "jpg", "png", "jpeg", "json", "mp3", "ogg"]
+                    .iter()
+                    .filter_map(|e| UTType::typeWithFilenameExtension(&NSString::from_str(e)))
+                    .collect();
+                if let Some(data) = UTType::typeWithIdentifier(&NSString::from_str("public.data")) {
+                    types.push(data);
+                }
+                if types.is_empty() {
+                    *CHOSEN_FILE.lock().unwrap_or_else(|err| err.into_inner()) = (None, None);
+                    show_error(Error::msg("Cannot determine document types for the file picker"));
+                    return;
+                }
+                let types = NSArray::from_retained_slice(&types);
+                UIDocumentPickerViewController::initForOpeningContentTypes_asCopy(picker, &types, true)
             } else {
                 #[allow(deprecated)]
                 {
@@ -313,9 +359,8 @@ pub fn request_file(id: impl Into<String>) {
             picker.setDelegate(Some(ProtocolObject::from_ref(&*dlg_obj)));
             DELEGATE.with(|it| *it.borrow_mut() = Some(dlg_obj));
 
-            inputbox::backend::IOS::get_top_view_controller(mtm)
-                .unwrap()
-                .presentViewController_animated_completion(&picker, true, None);
+            picker.setAllowsMultipleSelection(false);
+            presenter.presentViewController_animated_completion(&picker, true, None);
         } else if #[cfg(target_env = "ohos")] {
             miniquad::native::call_request_callback(format!(r#"{{"action": "chooseFile", "isPhoto": {}}}"#, is_photo));
         } else { // desktop
