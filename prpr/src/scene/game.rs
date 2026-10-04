@@ -153,6 +153,8 @@ pub struct GameScene {
     exercise_extra_open: bool,
 
     pub music: Music,
+    noise_renderer: Option<crate::noise_area::render::NoiseRenderer>,
+    correct_sound_events: Option<Arc<Vec<crate::correct_sound::ScheduledHit>>>,
 
     state: State,
     pub last_update_time: f64,
@@ -344,23 +346,46 @@ impl GameScene {
         .await
         .context("Failed to load resources")?;
 
+        res.has_noise_area = res.config.noise_area.enabled && !chart.extra.block_areas.is_empty();
+        let noise_renderer = if res.has_noise_area {
+            Some(
+                crate::noise_area::render::NoiseRenderer::new()
+                    .await
+                    .context("Failed to initialize noise-area renderer")?,
+            )
+        } else {
+            None
+        };
+        let upload_fn = if !chart.extra.block_areas.is_empty() && !res.config.noise_area.enabled {
+            None
+        } else {
+            upload_fn
+        };
         res.rotate_chart = mode == GameMode::EditChartPlay
             || (res.config.auto_flip_enabled
                 && matches!(mode, GameMode::Normal | GameMode::NoRetry | GameMode::Exercise)
                 && !res.info.replica_play.auto_flip_intervals.is_empty());
+        let correct_sound_events = Self::build_correct_sound_events(&chart, &res);
         // Prepare extra sfx from chart.hitsounds
-        chart.hitsounds.drain().for_each(|(name, clip)| {
-            if let Ok(clip) = res.create_sfx(clip) {
-                res.extra_sfxs.insert(name, clip);
+        chart.hitsounds.iter().for_each(|(name, clip)| {
+            if let Ok(clip) = res.create_sfx(clip.clone()) {
+                res.extra_sfxs.insert(name.clone(), clip);
             }
         });
+        // Keep custom clip references only when needed to rebuild the timeline
+        // after changing note conversion in the chart playback editor.
+        if !res.config.correct_sound {
+            chart.hitsounds.clear();
+        }
 
         let exercise_range = (chart.offset + info_offset + res.config.offset) as f64..res.track_length;
 
         let mut judge = Judge::new(&chart);
         judge.set_touch_debug_enabled(res.config.touch_input_debug_report);
 
-        let music = Self::new_music(&mut res, &mode)?;
+        tracing::info!(stage = "music_begin", noise = res.has_noise_area, "noise-area initialization");
+        let music = Self::new_music(&mut res, &mode, &correct_sound_events, (chart.offset + info_offset) as f64)?;
+        tracing::info!(stage = "music_ready", "noise-area initialization");
         let judgement_range_debug_used = res.config.judgement_range_debug.enabled;
         let mut play_report = PlayReportRecorder::new(
             &chart,
@@ -399,6 +424,8 @@ impl GameScene {
             exercise_extra_open: false,
 
             music,
+            noise_renderer,
+            correct_sound_events,
 
             state: State::Starting,
             last_update_time: 0.,
@@ -429,7 +456,34 @@ impl GameScene {
         })
     }
 
-    fn new_music(res: &mut Resource, mode: &GameMode) -> Result<Music> {
+    fn build_correct_sound_events(chart: &Chart, res: &Resource) -> Option<Arc<Vec<crate::correct_sound::ScheduledHit>>> {
+        res.config.correct_sound.then(|| {
+            let mut events = Vec::new();
+            for line in &chart.lines {
+                for note in line.notes.iter().filter(|note| !note.fake) {
+                    let clip = match &note.hitsound {
+                        crate::judge::HitSound::None => None,
+                        crate::judge::HitSound::Click => Some(res.res_pack.sfx_click.clone()),
+                        crate::judge::HitSound::Drag => Some(res.res_pack.sfx_drag.clone()),
+                        crate::judge::HitSound::Flick => Some(res.res_pack.sfx_flick.clone()),
+                        crate::judge::HitSound::Custom(name) => chart.hitsounds.get(name).cloned(),
+                    };
+                    if let Some(clip) = clip {
+                        events.push(crate::correct_sound::ScheduledHit { time: note.time, clip });
+                    }
+                }
+            }
+            events.sort_by(|a, b| a.time.total_cmp(&b.time));
+            Arc::new(events)
+        })
+    }
+
+    fn new_music(
+        res: &mut Resource,
+        mode: &GameMode,
+        events: &Option<Arc<Vec<crate::correct_sound::ScheduledHit>>>,
+        chart_offset: f64,
+    ) -> Result<Music> {
         Music::new(
             &mut res.audio,
             res.music.clone(),
@@ -439,6 +493,10 @@ impl GameScene {
                 ..Default::default()
             },
             *mode == GameMode::Exercise && res.config.practice_preserve_pitch,
+            res.has_noise_area && !res.config.noise_area.music_unaffected,
+            events.as_ref().map(|events| {
+                crate::correct_sound::CorrectSoundTrack::new(events.clone(), chart_offset + res.config.offset as f64, res.config.volume_sfx)
+            }),
         )
     }
 
@@ -535,7 +593,10 @@ impl GameScene {
                 if event.judgement == Ok(crate::judge::Judgement::Miss) {
                     display_event.difference = (event.time - note.time) / self.res.config.speed as f64;
                 }
-                self.timing_bar.record(&display_event, &note.kind, &self.res.config.timing_bar, real_time);
+                let scheme =
+                    (self.res.config.judgement_mode == crate::config::JudgementMode::Custom).then(|| self.res.config.custom_judgement.effective());
+                self.timing_bar
+                    .record_scaled(&display_event, &note.kind, &self.res.config.timing_bar, real_time, crate::timing_bar::extent(scheme));
             }
         }
         self.play_report.record_events(events);
@@ -865,7 +926,7 @@ impl GameScene {
                 }
                 let preserve_pitch = self.mode == GameMode::Exercise && res.config.practice_preserve_pitch;
                 if clicked == Some(0) && ((tm.speed - res.config.speed as f64).abs() > 1e-6 || self.music.preserves_pitch() != preserve_pitch) {
-                    self.music = Self::new_music(res, &self.mode)?;
+                    self.music = Self::new_music(res, &self.mode, &self.correct_sound_events, (self.chart.offset + self.info_offset) as f64)?;
                 }
                 match clicked {
                     Some(-1) => {
@@ -1181,7 +1242,7 @@ impl GameScene {
             }
         });
         if (tm.speed - self.res.config.speed as f64).abs() > 1e-6 || self.music.preserves_pitch() != preserve {
-            self.music = Self::new_music(&mut self.res, &self.mode)?;
+            self.music = Self::new_music(&mut self.res, &self.mode, &self.correct_sound_events, (self.chart.offset + self.info_offset) as f64)?;
         }
         if self.mode == GameMode::Exercise && (tm.now() > self.exercise_range.end || tm.now() < self.exercise_range.start) {
             pos = self.exercise_range.start;
@@ -1274,6 +1335,10 @@ impl GameScene {
             self.note_conversion_backup
                 .apply(&mut self.chart, self.res.info.replica_play.note_conversion);
             self.judge = Judge::new(&self.chart);
+            if self.res.config.correct_sound {
+                self.correct_sound_events = Self::build_correct_sound_events(&self.chart, &self.res);
+                self.music = Self::new_music(&mut self.res, &self.mode, &self.correct_sound_events, (self.chart.offset + self.info_offset) as f64)?;
+            }
             self.seek_chart_preview(self.res.time, tm)?;
         }
         self.sync_auto_flip();
@@ -1330,7 +1395,7 @@ impl Scene for GameScene {
         on_game_start();
         #[cfg(target_env = "ohos")]
         miniquad::native::set_interceptor_state(true);
-        self.music = Self::new_music(&mut self.res, &self.mode)?;
+        self.music = Self::new_music(&mut self.res, &self.mode, &self.correct_sound_events, (self.chart.offset + self.info_offset) as f64)?;
         self.res.camera.render_target = target;
         tm.speed = self.res.config.speed as _;
         tm.adjust_time = self.res.config.adjust_time;
@@ -1573,6 +1638,13 @@ impl Scene for GameScene {
             self.judge.update(&mut self.res, &mut self.chart, &mut self.bad_notes);
             self.gl.quad_gl.viewport(None);
         }
+        self.music.set_noise_touch(
+            !tm.paused()
+                && self.res.config.noise_area.enabled
+                && !self.res.config.noise_area.music_unaffected
+                && !self.judge.noise_state.blocked_ids.is_empty(),
+            get_frame_time(),
+        );
         self.capture_play_report_events(song_time, tm.real_time());
         self.timing_bar.animate(tm.real_time(), &self.res.config.timing_bar);
         if let Some(update) = &mut self.update_fn {
@@ -1842,6 +1914,9 @@ impl Scene for GameScene {
             );
             self.gl.quad_gl.viewport(chart_target_vp);
         }
+        if let Some(renderer) = &mut self.noise_renderer {
+            renderer.render(res, &self.chart.extra.block_areas, &self.judge.noise_state, ui.viewport)?;
+        }
         let rotating_canvas = self.res.rotate_chart;
         if !rotating_canvas {
             self.ui(ui, tm)?;
@@ -1871,7 +1946,7 @@ impl Scene for GameScene {
             }
             pop_camera_state();
         }
-        if msaa || !self.res.no_effect || self.res.rotate_chart {
+        if msaa || !self.res.no_effect || self.res.rotate_chart || self.res.has_noise_area {
             // render the texture onto screen
             if let Some(target) = &self.res.chart_target {
                 self.gl.flush();
@@ -1931,7 +2006,15 @@ impl Scene for GameScene {
                 ..ui.camera()
             });
             let profile = self.judge.judgement_range_profile(&self.res.config);
-            ui.abs_scope(|ui| crate::timing_bar::render(ui, &self.res.config.timing_bar, &self.timing_bar, &profile));
+            ui.abs_scope(|ui| {
+                crate::timing_bar::render(
+                    ui,
+                    &self.res.config.timing_bar,
+                    &self.timing_bar,
+                    &profile,
+                    (self.res.config.judgement_mode == crate::config::JudgementMode::Custom).then(|| self.res.config.custom_judgement.effective()),
+                )
+            });
             pop_camera_state();
             self.gl.quad_gl.viewport(saved_viewport);
         }

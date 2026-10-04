@@ -2,6 +2,7 @@
 use crate::{
     config::TimingBarConfig,
     core::NoteKind,
+    custom_judgement::Scheme,
     judge::{JudgeReportEvent, Judgement, JudgementRangeProfile},
     ui::Ui,
 };
@@ -26,12 +27,17 @@ pub struct TimingBar {
     last_real_time: Option<f64>,
     last_input_time: Option<f64>,
     last_three: VecDeque<Sample>,
+    extent_seconds: Option<f64>,
 }
 impl TimingBar {
     pub fn clear(&mut self) {
         *self = Self::default();
     }
     pub fn record(&mut self, event: &JudgeReportEvent, kind: &NoteKind, config: &TimingBarConfig, real_time: f64) {
+        self.record_scaled(event, kind, config, real_time, EXTENT_SECONDS);
+    }
+    pub fn record_scaled(&mut self, event: &JudgeReportEvent, kind: &NoteKind, config: &TimingBarConfig, real_time: f64, extent: f64) {
+        self.extent_seconds = Some(extent);
         self.expire(real_time, config);
         if let Ok(outcome) = event.judgement {
             if config.record_counts {
@@ -57,7 +63,7 @@ impl TimingBar {
         if let Some(judgement) = outcome {
             if event.difference.is_finite() {
                 let difference = if judgement == Judgement::Miss {
-                    event.difference.clamp(-EXTENT_SECONDS, EXTENT_SECONDS)
+                    event.difference.clamp(-extent, extent)
                 } else {
                     event.difference
                 };
@@ -88,7 +94,13 @@ impl TimingBar {
         if self.last_three.is_empty() {
             return 0.;
         }
-        (self.last_three.iter().map(|sample| sample.difference).sum::<f64>() / self.last_three.len() as f64).clamp(-EXTENT_SECONDS, EXTENT_SECONDS)
+        let extent = self.extent_seconds.unwrap_or(EXTENT_SECONDS);
+        (self
+            .last_three
+            .iter()
+            .map(|sample| sample.difference / self.last_three.len() as f64)
+            .sum::<f64>())
+        .clamp(-extent, extent)
     }
     pub fn animate(&mut self, real_time: f64, config: &TimingBarConfig) {
         self.expire(real_time, config);
@@ -106,6 +118,17 @@ fn color(j: Judgement) -> Color {
         Judgement::Good => YELLOW,
         Judgement::Bad | Judgement::Miss => RED,
     }
+}
+/// Symmetric real-time axis: zero stays at the centre even for asymmetric bands.
+pub fn extent(scheme: Option<&Scheme>) -> f64 {
+    scheme.map_or(EXTENT_SECONDS, |s| s.boundaries_ms[0].abs().max(s.boundaries_ms.last().unwrap().abs()) / 1000. + 0.020)
+}
+fn band_color(scheme: &Scheme, stage: usize) -> Color {
+    let c = scheme.bands[stage].color;
+    Color::from_rgba(c[0], c[1], c[2], c[3])
+}
+fn custom_color(scheme: &Scheme, difference: f64) -> Color {
+    scheme.classify(-difference * 1000.).map_or(RED, |stage| band_color(scheme, stage))
 }
 /// The screen-space anchor is the centre of the bar's baseline, including for arcs.
 pub fn position(config: &TimingBarConfig, half_height: f32, normalized: f32) -> Vec2 {
@@ -130,7 +153,7 @@ fn segment(ui: &mut Ui, a: Vec2, b: Vec2, width: f32, color: Color) {
     path.end(false);
     ui.stroke_path(&path.build(), width, color);
 }
-pub fn render(ui: &mut Ui, config: &TimingBarConfig, state: &TimingBar, profile: &JudgementRangeProfile) {
+pub fn render(ui: &mut Ui, config: &TimingBarConfig, state: &TimingBar, profile: &JudgementRangeProfile, scheme: Option<&Scheme>) {
     let scale = if config.size.is_finite() {
         config.size.clamp(5., 500.) / 100.
     } else {
@@ -138,38 +161,48 @@ pub fn render(ui: &mut Ui, config: &TimingBarConfig, state: &TimingBar, profile:
     };
     let half_height = ui.top;
     let pos = |n| position(config, half_height, n);
-    // Split at exact thresholds, including Phira's asymmetric late compensation.
-    let mut boundaries = vec![
-        -EXTENT_SECONDS,
-        -profile.tap_outer.early,
-        -profile.tap_good.early,
-        -profile.tap_perfect.early,
-        0.,
-        profile.tap_perfect.late,
-        profile.tap_good.late,
-        profile.tap_outer.late,
-        EXTENT_SECONDS,
-    ];
+    let extent = extent(scheme);
+    let mut boundaries = if let Some(scheme) = scheme {
+        let mut points = vec![-extent, 0., extent];
+        points.extend(scheme.boundaries_ms.iter().map(|ms| -ms / 1000.));
+        points
+    } else {
+        vec![
+            -extent,
+            -profile.tap_outer.early,
+            -profile.tap_good.early,
+            -profile.tap_perfect.early,
+            0.,
+            profile.tap_perfect.late,
+            profile.tap_good.late,
+            profile.tap_outer.late,
+            extent,
+        ]
+    };
     for b in &mut boundaries {
-        *b = b.clamp(-EXTENT_SECONDS, EXTENT_SECONDS);
+        *b = b.clamp(-extent, extent);
     }
     boundaries.sort_by(f64::total_cmp);
     boundaries.dedup();
     for pair in boundaries.windows(2) {
-        let middle = (pair[0] + pair[1]) / 2.;
-        let early = middle < 0.;
-        let abs = middle.abs();
-        let perfect = if early { profile.tap_perfect.early } else { profile.tap_perfect.late };
-        let good = if early { profile.tap_good.early } else { profile.tap_good.late };
-        let c = color(if abs <= perfect {
-            Judgement::Perfect
-        } else if abs <= good {
-            Judgement::Good
+        let middle = pair[0] * 0.5 + pair[1] * 0.5;
+        let c = if let Some(scheme) = scheme {
+            custom_color(scheme, middle)
         } else {
-            Judgement::Bad
-        });
-        let n0 = (pair[0] / EXTENT_SECONDS) as f32;
-        let n1 = (pair[1] / EXTENT_SECONDS) as f32;
+            let early = middle < 0.;
+            let abs = middle.abs();
+            let perfect = if early { profile.tap_perfect.early } else { profile.tap_perfect.late };
+            let good = if early { profile.tap_good.early } else { profile.tap_good.late };
+            color(if abs <= perfect {
+                Judgement::Perfect
+            } else if abs <= good {
+                Judgement::Good
+            } else {
+                Judgement::Bad
+            })
+        };
+        let n0 = (pair[0] / extent) as f32;
+        let n1 = (pair[1] / extent) as f32;
         let pieces = if config.curved { ((n1 - n0) * 48.).ceil().max(1.) as usize } else { 1 };
         for i in 0..pieces {
             let a = n0 + (n1 - n0) * i as f32 / pieces as f32;
@@ -181,14 +214,23 @@ pub fn render(ui: &mut Ui, config: &TimingBarConfig, state: &TimingBar, profile:
     segment(ui, centre - vec2(0., 0.014 * scale), centre + vec2(0., 0.014 * scale), 0.003 * scale, WHITE);
     let now = state.last_real_time.unwrap_or(0.);
     for sample in &state.samples {
-        let p = pos((sample.difference / EXTENT_SECONDS) as f32);
-        let c = Color {
-            a: (1. - ((now - sample.born_at).max(0.) / config.retention_seconds()) as f32).clamp(0., 1.),
-            ..color(sample.judgement)
-        };
+        let p = pos((sample.difference / extent) as f32);
+        let mut c = scheme.map_or_else(
+            || color(sample.judgement),
+            |scheme| {
+                if sample.judgement == Judgement::Miss {
+                    band_color(scheme, scheme.bands.len() - 1)
+                } else if sample.judgement == Judgement::Bad {
+                    band_color(scheme, 0)
+                } else {
+                    custom_color(scheme, sample.difference)
+                }
+            },
+        );
+        c.a *= (1. - ((now - sample.born_at).max(0.) / config.retention_seconds()) as f32).clamp(0., 1.);
         segment(ui, p - vec2(0., 0.045 * scale), p - vec2(0., 0.026 * scale), 0.006 * scale, c);
     }
-    let p = pos((state.indicator / EXTENT_SECONDS) as f32) + vec2(0., 0.024 * scale);
+    let p = pos((state.indicator / extent) as f32) + vec2(0., 0.024 * scale);
     let mut triangle = Path::builder();
     triangle.begin(point(p.x, p.y));
     triangle.line_to(point(p.x - 0.012 * scale, p.y + 0.018 * scale));
@@ -212,6 +254,36 @@ pub fn render(ui: &mut Ui, config: &TimingBarConfig, state: &TimingBar, profile:
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn custom_axis_is_symmetric_padded_and_keeps_physical_size() {
+        let mut scheme = Scheme::new(9);
+        assert!((extent(Some(&scheme)) - 0.200).abs() < 1e-12);
+        scheme.boundaries_ms = vec![300., 280., 240., 200., 120., -10., -80., -200., -500.];
+        assert!((extent(Some(&scheme)) - 0.520).abs() < 1e-12);
+        let cfg = TimingBarConfig::default();
+        let zero = position(&cfg, 0.56, 0.);
+        let early = position(&cfg, 0.56, -1.);
+        let late = position(&cfg, 0.56, 1.);
+        assert_eq!(zero.x, 0.);
+        assert!((late.x - zero.x - (zero.x - early.x)).abs() < 1e-6);
+        for (i, pair) in scheme.boundaries_ms.windows(2).enumerate() {
+            let difference = -(pair[0] * 0.5 + pair[1] * 0.5) / 1000.;
+            assert_eq!(custom_color(&scheme, difference), band_color(&scheme, i));
+        }
+        assert_eq!(custom_color(&scheme, 0.510), band_color(&scheme, 8));
+    }
+    #[test]
+    fn custom_large_offsets_are_not_truncated_at_old_250ms_extent() {
+        let mut scheme = Scheme::new(5);
+        scheme.boundaries_ms = vec![900., 600., 100., -100., -700.];
+        let mut state = TimingBar::default();
+        let cfg = TimingBarConfig::default();
+        state.record_scaled(&event(Ok(Judgement::Miss), 0.710), &NoteKind::Click, &cfg, 0., extent(Some(&scheme)));
+        assert_eq!(state.samples.back().unwrap().difference, 0.710);
+        assert!((state.target() - 0.710).abs() < 1e-12);
+        state.record_scaled(&event(Ok(Judgement::Good), -0.5), &NoteKind::Click, &cfg, 0.1, extent(Some(&scheme)));
+        assert!((state.target() - 0.105).abs() < 1e-12);
+    }
     fn event(j: Result<Judgement, bool>, diff: f64) -> JudgeReportEvent {
         JudgeReportEvent {
             time: 1.,

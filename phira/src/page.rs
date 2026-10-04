@@ -1,5 +1,6 @@
 pub mod coll;
 pub mod timing_editor;
+mod custom_judgement;
 pub use coll::CollectionPage;
 
 mod event;

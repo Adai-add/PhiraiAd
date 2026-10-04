@@ -24,6 +24,7 @@ pub enum JudgementMode {
     #[default]
     Phira,
     PhigrosReplica,
+    Custom,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -211,9 +212,12 @@ pub struct Config {
     pub interactive: bool,
     pub judgement_range_debug: JudgementRangeDebug,
     pub timing_bar: TimingBarConfig,
+    /// Play hitsounds at chart time in the audio callback, independent of judgement.
+    pub correct_sound: bool,
     /// Phigros block-area rendering and audio switches.
     pub noise_area: crate::noise_area::NoiseAreaConfig,
     pub judgement_mode: JudgementMode,
+    pub custom_judgement: crate::custom_judgement::CustomJudgementConfig,
     pub phigros_strict_judgement: bool,
     /// Runtime-only course flag; never modifies saved normal-play preferences.
     #[serde(skip)]
@@ -273,8 +277,10 @@ impl Default for Config {
             interactive: true,
             judgement_range_debug: JudgementRangeDebug::default(),
             timing_bar: TimingBarConfig::default(),
+            correct_sound: false,
             noise_area: crate::noise_area::NoiseAreaConfig::default(),
             judgement_mode: JudgementMode::Phira,
+            custom_judgement: Default::default(),
             phigros_strict_judgement: false,
             challenge_mode: false,
             mods: Mods::default(),
@@ -562,5 +568,18 @@ mod speed_tests {
             assert_eq!(config.speed, expected_playback);
             assert_eq!(config.note_flow_speed, expected_flow);
         }
+    }
+}
+
+#[cfg(test)]
+mod correct_sound_config_tests {
+    use super::*;
+    #[test]
+    fn old_preferences_keep_correct_sound_disabled() {
+        let mut config: Config = serde_json::from_str("{}").unwrap();
+        assert!(!config.correct_sound);
+        config.correct_sound = true;
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(serde_json::from_str::<Config>(&json).unwrap().correct_sound);
     }
 }

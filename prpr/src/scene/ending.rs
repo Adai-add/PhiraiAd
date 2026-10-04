@@ -108,6 +108,9 @@ impl EndingScene {
                 "Phigros判定"
             });
         }
+        if config.judgement_mode == crate::config::JudgementMode::Custom {
+            extra_status.push("自定义判定");
+        }
         match info.replica_play.note_conversion {
             crate::chart_play::NoteConversion::Original => {}
             crate::chart_play::NoteConversion::Tap => extra_status.push("All Tap Note"),

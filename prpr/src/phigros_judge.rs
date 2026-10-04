@@ -210,7 +210,7 @@ impl Judge {
         start..end
     }
 
-    fn candidate(&self, frame: &Frame<'_>, finger: &Finger, flick: bool) -> Option<usize> {
+    fn candidate(&self, frame: &Frame<'_>, finger: &Finger, flick: bool, custom: Option<(f64, f64)>) -> Option<usize> {
         let windows = frame.windows;
         let (early, late, width) = if flick {
             (windows.flick, windows.flick, 2.1)
@@ -220,7 +220,14 @@ impl Judge {
         let mut best: Option<usize> = None;
         let mut best_abs_dt = 10000.;
         let mut best_metric = 10000.;
-        for index in self.interval(frame, early, late) {
+        let range = if let Some((early, miss)) = custom.filter(|_| flick) {
+            let start = self.notes.partition_point(|note| (note.time - frame.now) / frame.speed <= miss);
+            let end = self.notes.partition_point(|note| (note.time - frame.now) / frame.speed <= early);
+            start..end.max(start)
+        } else {
+            self.interval(frame, early, late)
+        };
+        for index in range {
             let note = &self.notes[index];
             let state = &note.state;
             if state.skipped
@@ -266,18 +273,28 @@ impl Judge {
     }
 
     pub fn step(&mut self, frame: Frame<'_>) -> Result {
+        self.step_impl(frame, None)
+    }
+
+    /// Reuse the original gesture matching/arming/resolution, changing only
+    /// early activation and unarmed Miss boundaries (signed seconds, early positive).
+    pub fn step_custom_gestures(&mut self, frame: Frame<'_>, early: f64, miss: f64) -> Result {
+        self.step_impl(frame, Some((early, miss)))
+    }
+
+    fn step_impl(&mut self, frame: Frame<'_>, custom: Option<(f64, f64)>) -> Result {
         let mut result = Result::default();
         // Match all gestures before scoring: a note crossing its late limit
         // this frame must still be available to the interval fallback.
         for finger in frame.fingers.iter().filter(|finger| finger.click) {
-            if let Some(index) = self.candidate(&frame, finger, false) {
+            if let Some(index) = self.candidate(&frame, finger, false, custom) {
                 if self.notes[index].kind != Kind::Flick {
                     self.notes[index].state.clicked = true;
                 }
             }
         }
         for (finger_id, finger) in frame.fingers.iter().enumerate().filter(|(_, finger)| finger.flick) {
-            if let Some(index) = self.candidate(&frame, finger, true) {
+            if let Some(index) = self.candidate(&frame, finger, true, custom) {
                 self.notes[index].state.matched = true;
                 result.consumed_fingers.push(finger_id);
             }
@@ -358,17 +375,17 @@ impl Judge {
                 }
                 Kind::Drag => {
                     // A CheckNote click never arms DragControl.
-                    if !state.matched && dt.abs() <= DRAG_WINDOW && present(2.1) {
+                    if !state.matched && custom.map_or(dt.abs() <= DRAG_WINDOW, |(early, miss)| dt <= early && dt > miss) && present(2.1) {
                         state.matched = true;
                     }
-                    if !state.matched && dt < -DRAG_WINDOW {
+                    if !state.matched && custom.map_or(dt < -DRAG_WINDOW, |(_, miss)| dt <= miss) {
                         outcome = Some(Outcome::Miss);
                     } else if state.matched && dt < RESOLVE_EARLY {
                         outcome = Some(Outcome::Perfect);
                     }
                 }
                 Kind::Flick => {
-                    if !state.matched && dt < -windows.flick {
+                    if !state.matched && custom.map_or(dt < -windows.flick, |(_, miss)| dt <= miss) {
                         outcome = Some(Outcome::Miss);
                     } else if state.matched && dt < RESOLVE_EARLY {
                         outcome = Some(Outcome::Perfect);
@@ -394,6 +411,54 @@ impl Judge {
 mod tests {
     use super::*;
 
+    #[test]
+    fn custom_gestures_only_override_outer_boundaries() {
+        for kind in [Kind::Drag, Kind::Flick] {
+            let held = vec![vec![[0., 0.]]];
+            let input = [finger(false, kind == Kind::Flick, 0.)];
+            let mut judge = Judge::new(vec![note(kind, 0.)]);
+            assert!(judge.step_custom_gestures(frame(-0.181, &input, &held), 0.180, -0.165).events.is_empty());
+            assert!(!judge.notes[0].state.matched);
+            assert!(judge.step_custom_gestures(frame(-0.180, &input, &held), 0.180, -0.165).events.is_empty());
+            assert!(judge.notes[0].state.matched);
+            let result = judge.step_custom_gestures(frame(0., &[], &[]), 0.180, -0.165);
+            assert!(matches!(
+                result.events.as_slice(),
+                [Event::Final {
+                    outcome: Outcome::Perfect,
+                    ..
+                }]
+            ));
+            let mut late = Judge::new(vec![note(kind, 0.)]);
+            let result = late.step_custom_gestures(frame(0.160, &input, &held), 0.180, -0.165);
+            assert!(matches!(
+                result.events.as_slice(),
+                [Event::Final {
+                    outcome: Outcome::Perfect,
+                    ..
+                }]
+            ));
+            let mut missed = Judge::new(vec![note(kind, 0.)]);
+            let result = missed.step_custom_gestures(frame(0.165, &input, &held), 0.180, -0.165);
+            assert!(matches!(result.events.as_slice(), [Event::Final { outcome: Outcome::Miss, .. }]));
+        }
+    }
+    #[test]
+    fn custom_shifted_gesture_windows_still_only_produce_perfect_or_miss() {
+        for kind in [Kind::Drag, Kind::Flick] {
+            let held = vec![vec![[0., 0.]]];
+            let input = [finger(false, kind == Kind::Flick, 0.)];
+            let mut judge = Judge::new(vec![note(kind, 0.)]);
+            let result = judge.step_custom_gestures(frame(0.300, &input, &held), -0.200, -0.500);
+            assert!(matches!(
+                result.events.as_slice(),
+                [Event::Final {
+                    outcome: Outcome::Perfect,
+                    ..
+                }]
+            ));
+        }
+    }
     const NORMAL: Windows = Windows {
         perfect: 0.08,
         good: 0.18,
@@ -517,8 +582,8 @@ mod tests {
         second.note_id = 1;
         let mut judge = Judge::new(vec![first, second]);
         let input = [finger(true, false, 0.)];
-        assert_eq!(judge.candidate(&frame(0., &input, &[]), &input[0], false), Some(0));
-        assert_eq!(judge.candidate(&frame(0.02, &input, &[]), &input[0], false), Some(1));
+        assert_eq!(judge.candidate(&frame(0., &input, &[]), &input[0], false, None), Some(0));
+        assert_eq!(judge.candidate(&frame(0.02, &input, &[]), &input[0], false, None), Some(1));
         judge.step(frame(0., &input, &[]));
         assert!(judge.notes[0].state.clicked);
         assert!(!judge.notes[1].state.clicked);
@@ -533,7 +598,7 @@ mod tests {
         strong.note_id = 1;
         let judge = Judge::new(vec![weak, strong]);
         let input = finger(true, false, 0.);
-        assert_eq!(judge.candidate(&frame(0., &[], &[]), &input, false), Some(1));
+        assert_eq!(judge.candidate(&frame(0., &[], &[]), &input, false, None), Some(1));
         let mut a = note(Kind::Tap, 0.);
         a.x = 0.2;
         let mut b = Note::new(1, 0, 0., 1., Kind::Hold);
@@ -544,7 +609,7 @@ mod tests {
             flick: false,
             positions: vec![Some([0., 2.2]), Some([0., 0.])],
         };
-        assert_eq!(judge.candidate(&frame(0., &[], &[]), &input, false), Some(1));
+        assert_eq!(judge.candidate(&frame(0., &[], &[]), &input, false, None), Some(1));
     }
 
     #[test]
@@ -565,7 +630,7 @@ mod tests {
             positions: vec![Some([0., 2.2]), Some([0., 4.4]), Some([0., 6.6])],
         };
         let mut judge = Judge::new(notes.into_iter().map(|(n, _)| n).collect());
-        assert_eq!(judge.candidate(&frame(0.99, &[], &[]), &input, true), Some(2));
+        assert_eq!(judge.candidate(&frame(0.99, &[], &[]), &input, true, None), Some(2));
         let result = judge.step(frame(0.99, &[input], &[]));
         assert_eq!(result.consumed_fingers, vec![0]);
         assert_eq!(judge.notes.iter().filter(|n| n.state.matched).count(), 1);
@@ -580,9 +645,9 @@ mod tests {
         b.note_id = 1;
         let judge = Judge::new(vec![a, b]);
         let input = finger(false, true, 0.);
-        assert_eq!(judge.candidate(&frame(0., &[], &[]), &input, true), Some(0));
+        assert_eq!(judge.candidate(&frame(0., &[], &[]), &input, true, None), Some(0));
         let judge = Judge::new(vec![note(Kind::Flick, 0.)]);
-        assert_eq!(judge.candidate(&frame(0., &[], &[]), &finger(false, true, 2.1), true), None);
+        assert_eq!(judge.candidate(&frame(0., &[], &[]), &finger(false, true, 2.1), true, None), None);
     }
 
     #[test]
@@ -749,9 +814,9 @@ mod tests {
     fn click_width_and_bad_shrink_follow_world_units() {
         let judge = Judge::new(vec![note(Kind::Tap, 0.)]);
         let f = frame(-0.2, &[], &[]);
-        assert_eq!(judge.candidate(&f, &finger(true, false, 0.9), false), Some(0));
-        assert_eq!(judge.candidate(&f, &finger(true, false, 1.5), false), None);
-        assert_eq!(judge.candidate(&frame(0., &[], &[]), &finger(true, false, 1.9), false), None);
+        assert_eq!(judge.candidate(&f, &finger(true, false, 0.9), false, None), Some(0));
+        assert_eq!(judge.candidate(&f, &finger(true, false, 1.5), false, None), None);
+        assert_eq!(judge.candidate(&frame(0., &[], &[]), &finger(true, false, 1.9), false, None), None);
     }
 
     #[test]
@@ -764,7 +829,7 @@ mod tests {
             let judge = Judge::new(vec![drag, tap]);
             let mut f = frame(-0.05 * speed, &[], &[]);
             f.speed = speed;
-            assert_eq!(judge.candidate(&f, &finger(true, false, 0.), false), Some(0));
+            assert_eq!(judge.candidate(&f, &finger(true, false, 0.), false, None), Some(0));
         }
     }
 

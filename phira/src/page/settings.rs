@@ -288,6 +288,10 @@ impl Page for SettingsPage {
     }
 
     fn next_page(&mut self) -> NextPage {
+        if self.list_replica.chart.custom_edit_requested {
+            self.list_replica.chart.custom_edit_requested = false;
+            return NextPage::Overlay(Box::new(super::custom_judgement::CustomJudgementEditor::new()));
+        }
         if self.list_replica.timing_edit_requested {
             self.list_replica.timing_edit_requested = false;
             return NextPage::Overlay(Box::new(super::timing_editor::TimingEditor::new()));
@@ -391,6 +395,13 @@ fn render_title<'a>(ui: &mut Ui, title: impl Into<Cow<'a, str>>, subtitle: Optio
 #[inline]
 fn render_switch(ui: &mut Ui, r: Rect, t: f32, btn: &mut DRectButton, on: bool) {
     btn.render_text(ui, r, t, if on { ttl!("switch-on") } else { ttl!("switch-off") }, 0.5, on);
+}
+
+fn render_replica_switch_row(ui: &mut Ui, w: f32, t: f32, title: &str, subtitle: Option<&str>, btn: &mut DRectButton, enabled: bool) {
+    ui.fill_path(&Rect::new(0., 0., w, ITEM_HEIGHT - 0.012).rounded(0.012), Color::from_rgba(30, 49, 62, 180));
+    render_partition_title(ui, w, true, Cow::Borrowed(title), subtitle.map(Cow::Borrowed));
+    render_switch(ui, right_rect(w), t, btn, enabled);
+    ui.dy(ITEM_HEIGHT);
 }
 
 #[inline]
@@ -829,11 +840,14 @@ impl AudioList {
 struct ChartList {
     replica: bool,
     judge_mode_btn: ChooseButton,
+    custom_edit_btn: DRectButton,
+    custom_edit_requested: bool,
     phigros_strict_judge_btn: DRectButton,
     shorten_holds_btn: DRectButton,
     ai_auto_btn: DRectButton,
     auto_flip_btn: DRectButton,
     hold_head_effect_btn: DRectButton,
+    correct_sound_btn: DRectButton,
     show_acc_btn: DRectButton,
     ap_fc_indicator_btn: DRectButton,
     show_avg_fps_btn: DRectButton,
@@ -850,16 +864,24 @@ impl ChartList {
         Self {
             replica,
             judge_mode_btn: ChooseButton::new()
-                .with_options(vec![tl!("judgement-mode-phira").into_owned(), tl!("judgement-mode-phigros").into_owned()])
+                .with_options(vec![
+                    tl!("judgement-mode-phira").into_owned(),
+                    tl!("judgement-mode-phigros").into_owned(),
+                    "自定义".into(),
+                ])
                 .with_selected(match get_data().config.judgement_mode {
                     JudgementMode::Phira => 0,
                     JudgementMode::PhigrosReplica => 1,
+                    JudgementMode::Custom => 2,
                 }),
+            custom_edit_btn: DRectButton::new(),
+            custom_edit_requested: false,
             phigros_strict_judge_btn: DRectButton::new(),
             shorten_holds_btn: DRectButton::new(),
             ai_auto_btn: DRectButton::new(),
             auto_flip_btn: DRectButton::new(),
             hold_head_effect_btn: DRectButton::new(),
+            correct_sound_btn: DRectButton::new(),
             show_acc_btn: DRectButton::new(),
             ap_fc_indicator_btn: DRectButton::new(),
             show_avg_fps_btn: DRectButton::new(),
@@ -879,6 +901,14 @@ impl ChartList {
     pub fn touch(&mut self, touch: &Touch, t: f32) -> Result<Option<bool>> {
         let data = get_data_mut();
         let config = &mut data.config;
+        if self.replica && config.judgement_mode == JudgementMode::Custom && self.custom_edit_btn.touch(touch, t) {
+            self.custom_edit_requested = true;
+            return Ok(Some(false));
+        }
+        if self.replica && self.correct_sound_btn.touch(touch, t) {
+            config.correct_sound ^= true;
+            return Ok(Some(true));
+        }
         if self.replica && self.judge_mode_btn.touch(touch, t) {
             return Ok(Some(false));
         }
@@ -898,7 +928,7 @@ impl ChartList {
             config.shorten_holds ^= true;
             return Ok(Some(true));
         }
-        if self.replica && config.has_custom_judgement() && self.phigros_strict_judge_btn.touch(touch, t) {
+        if self.replica && config.judgement_mode == JudgementMode::PhigrosReplica && self.phigros_strict_judge_btn.touch(touch, t) {
             config.phigros_strict_judgement ^= true;
             return Ok(Some(true));
         }
@@ -946,8 +976,10 @@ impl ChartList {
         if self.judge_mode_btn.changed() {
             get_data_mut().config.judgement_mode = match self.judge_mode_btn.selected() {
                 0 => JudgementMode::Phira,
-                _ => JudgementMode::PhigrosReplica,
+                1 => JudgementMode::PhigrosReplica,
+                _ => JudgementMode::Custom,
             };
+            self.custom_edit_btn = DRectButton::new();
             return Ok(true);
         }
         Ok(false)
@@ -974,7 +1006,16 @@ impl ChartList {
                 self.judge_mode_btn.render(ui, rr, t);
             }
         }
-        if self.replica && config.has_custom_judgement() {
+        if self.replica && config.judgement_mode == JudgementMode::Custom {
+            ui.dx(0.035);
+            let cw = w - 0.035;
+            item! { cw;
+                render_partition_title(ui,cw,true,"自定义判定",Some(config.custom_judgement.current.name.as_str().into()));
+                self.custom_edit_btn.render_text(ui,right_rect(cw),t,"编辑",0.5,false);
+            }
+            ui.dx(-0.035);
+        }
+        if self.replica && config.judgement_mode == JudgementMode::PhigrosReplica {
             ui.dx(0.035);
             let w = w - 0.035;
             let rr = right_rect(w);
@@ -1060,6 +1101,12 @@ impl ChartList {
             item! { w;
                 render_partition_title(ui, w, self.replica, tl!("item-note-size"), None);
                 self.size_slider.render(ui, rr, t, config.note_scale, format!("{:.3}", config.note_scale));
+            }
+        }
+        if self.replica {
+            item! { w;
+                render_partition_title(ui, w, true, Cow::Borrowed("正解音"), Some(Cow::Borrowed("开启后，所有音符在0偏移时播放打击音效，而不是实际被打击时")));
+                render_switch(ui, rr, t, &mut self.correct_sound_btn, config.correct_sound);
             }
         }
         if self.replica {
@@ -1495,14 +1542,33 @@ impl ReplicaList {
         }
         if self.noise_btn.touch(touch, t) {
             self.noise_open ^= true;
+            self.noise_enabled_btn = DRectButton::new();
+            self.noise_precise_btn = DRectButton::new();
+            self.noise_distortion_btn = DRectButton::new();
+            self.noise_music_btn = DRectButton::new();
             return Ok(Some(false));
         }
         if self.noise_open {
             let cfg = &mut get_data_mut().config.noise_area;
-            if self.noise_enabled_btn.touch(touch, t) { cfg.enabled ^= true; return Ok(Some(true)); }
-            if cfg.enabled && self.noise_precise_btn.touch(touch, t) { cfg.precise_edges ^= true; return Ok(Some(true)); }
-            if cfg.enabled && self.noise_distortion_btn.touch(touch, t) { cfg.remove_distortion ^= true; return Ok(Some(true)); }
-            if cfg.enabled && self.noise_music_btn.touch(touch, t) { cfg.music_unaffected ^= true; return Ok(Some(true)); }
+            if self.noise_enabled_btn.touch(touch, t) {
+                cfg.enabled ^= true;
+                self.noise_precise_btn = DRectButton::new();
+                self.noise_distortion_btn = DRectButton::new();
+                self.noise_music_btn = DRectButton::new();
+                return Ok(Some(true));
+            }
+            if cfg.enabled && self.noise_precise_btn.touch(touch, t) {
+                cfg.precise_edges ^= true;
+                return Ok(Some(true));
+            }
+            if cfg.enabled && self.noise_distortion_btn.touch(touch, t) {
+                cfg.remove_distortion ^= true;
+                return Ok(Some(true));
+            }
+            if cfg.enabled && self.noise_music_btn.touch(touch, t) {
+                cfg.music_unaffected ^= true;
+                return Ok(Some(true));
+            }
         }
         if self.gameplay_btn.touch(touch, t) {
             self.gameplay_open ^= true;
@@ -1575,38 +1641,46 @@ impl ReplicaList {
                     } else if group == 2 {
                         let w = child.w;
                         let config = &get_data().config.timing_bar;
-                        ui.text("显示准度条").pos(0.035, 0.025).size(0.5).max_width(w - 0.57).draw();
+                        ui.fill_path(&Rect::new(0., 0., w, ITEM_HEIGHT - 0.012).rounded(0.012), Color::from_rgba(30, 49, 62, 180));
+                        render_partition_title(ui, w - 0.23, true, Cow::Borrowed("显示准度条"), None);
+                        let rr = right_rect(w);
                         self.timing_edit_btn
-                            .render_text(ui, Rect::new(w - 0.52, 0.02, 0.20, 0.08), t, "编辑", 0.4, false);
-                        render_switch(ui, Rect::new(w - INTERACT_WIDTH, 0.02, INTERACT_WIDTH, 0.08), t, &mut self.timing_enabled_btn, config.enabled);
-                        ui.dy(0.12);
-                        ui.text("按键记录").pos(0.035, 0.025).size(0.5).max_width(w - 0.39).draw();
-                        render_switch(
-                            ui,
-                            Rect::new(w - INTERACT_WIDTH, 0.02, INTERACT_WIDTH, 0.08),
-                            t,
-                            &mut self.timing_counts_btn,
-                            config.record_counts,
-                        );
-                        (w, 0.24)
+                            .render_text(ui, Rect::new(rr.x - 0.23, rr.y, 0.20, rr.h), t, "编辑", 0.5, false);
+                        render_switch(ui, rr, t, &mut self.timing_enabled_btn, config.enabled);
+                        ui.dy(ITEM_HEIGHT);
+                        render_replica_switch_row(ui, w, t, "显示按键记录", None, &mut self.timing_counts_btn, config.record_counts);
+                        (w, ITEM_HEIGHT * 2.)
                     } else if group == 3 {
                         let w = child.w;
                         let cfg = &get_data().config.noise_area;
-                        let row = |ui: &mut Ui, y: f32, title: &str, subtitle: Option<&str>, btn: &mut DRectButton, value: bool| {
-                            render_partition_title(ui, w, true, title, subtitle.map(Cow::Borrowed));
-                            render_switch(ui, Rect::new(w - INTERACT_WIDTH, y + 0.02, INTERACT_WIDTH, 0.08), t, btn, value);
-                        };
-                        row(ui, 0., "噪域开/关", None, &mut self.noise_enabled_btn, cfg.enabled);
-                        ui.dy(0.12);
+                        render_replica_switch_row(ui, w, t, "噪域开/关", None, &mut self.noise_enabled_btn, cfg.enabled);
                         if cfg.enabled {
-                            row(ui, 0., "精确边缘", Some("开启后将原版模糊的边缘渲染成精确边缘"), &mut self.noise_precise_btn, cfg.precise_edges);
-                            ui.dy(0.15);
-                            row(ui, 0., "去除扭曲特效", Some("开启后噪域内的判定线、音符不再扭曲"), &mut self.noise_distortion_btn, cfg.remove_distortion);
-                            ui.dy(0.15);
-                            row(ui, 0., "音乐不受影响", None, &mut self.noise_music_btn, cfg.music_unaffected);
-                            ui.dy(0.12);
-                            (w, 0.54)
-                        } else { (w, 0.12) }
+                            ui.dx(0.035);
+                            let nested_w = w - 0.035;
+                            render_replica_switch_row(
+                                ui,
+                                nested_w,
+                                t,
+                                "精确边缘",
+                                Some("开启后将原版模糊的边缘渲染成精确边缘"),
+                                &mut self.noise_precise_btn,
+                                cfg.precise_edges,
+                            );
+                            render_replica_switch_row(
+                                ui,
+                                nested_w,
+                                t,
+                                "去除扭曲特效",
+                                Some("开启后噪域内的判定线、音符不再扭曲"),
+                                &mut self.noise_distortion_btn,
+                                cfg.remove_distortion,
+                            );
+                            render_replica_switch_row(ui, nested_w, t, "音乐不受影响", None, &mut self.noise_music_btn, cfg.music_unaffected);
+                            ui.dx(-0.035);
+                            (w, ITEM_HEIGHT * 4.)
+                        } else {
+                            (w, ITEM_HEIGHT)
+                        }
                     } else {
                         self.reports.render(ui, child, t)
                     }

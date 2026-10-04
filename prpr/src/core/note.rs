@@ -171,7 +171,16 @@ impl Note {
         } {
             self.init_ctrl_obj(ctrl_obj, line_height);
             res.with_model(parent_tr * self.now_transform(res, ctrl_obj, 0., 0.), |res| {
-                res.emit_at_origin(parent_rot + if self.above { 0. } else { 180. }, color)
+                let custom_offset = if res.config.judgement_mode == crate::config::JudgementMode::Custom {
+                    if let JudgeStatus::Hold(_, _, head, ..) = self.judge {
+                        Some((self.time - head) / res.config.speed as f64 * 1000.)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                res.emit_judgement_effect(parent_rot + if self.above { 0. } else { 180. }, color, custom_offset)
             });
         }
     }

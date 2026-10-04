@@ -1,4 +1,5 @@
-//! Practice-only pitch preservation. Native sasa playback is kept for disabled/1x.
+//! Streaming music for practice pitch preservation, noise filtering, and scheduled hitsounds.
+//! Native sasa playback is kept when none of these processing paths is needed.
 //! Streams bounded chunks from the already decoded clip; never expands the song
 //! into a second full-length buffer. Positions and seeks always use song seconds.
 use anyhow::{ensure, Context, Result};
@@ -7,7 +8,7 @@ use std::{
     ffi::c_void,
     ptr::NonNull,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc, Arc, OnceLock, Weak,
     },
 };
@@ -124,6 +125,7 @@ impl PitchStream {
 struct Shared {
     position: AtomicU64,
     paused: AtomicBool,
+    cutoff: AtomicU32,
 }
 enum Command {
     Play,
@@ -132,6 +134,9 @@ enum Command {
 }
 struct Corrected {
     stream: PitchStream,
+    pitch_enabled: bool,
+    filter: crate::noise_area::audio::StereoLowPass,
+    correct_sound: Option<crate::correct_sound::CorrectSoundTrack>,
     shared: Weak<Shared>,
     rx: mpsc::Receiver<Command>,
     paused: bool,
@@ -155,28 +160,50 @@ impl Corrected {
             seek = Some(self.position);
         }
         if let Some(time) = seek {
+            self.filter.reset();
+            if let Some(track) = &mut self.correct_sound {
+                track.seek(time);
+            }
             if self.stream.seek(time, sr).is_err() {
                 self.paused = true;
             }
+        }
+        if let Some(s) = self.shared.upgrade() {
+            self.filter.configure(f32::from_bits(s.cutoff.load(Ordering::Relaxed)), sr);
         }
         self.publish();
         !self.paused
     }
     fn publish(&self) {
         if let Some(s) = self.shared.upgrade() {
-            s.position.store(self.position.to_bits(), Ordering::Relaxed);
+            s.position
+                .store(self.position.min(self.stream.clip.length()).to_bits(), Ordering::Relaxed);
             s.paused.store(self.paused, Ordering::Relaxed);
         }
     }
     fn frame(&mut self) -> Option<Frame> {
-        if self.position >= self.stream.clip.length() {
+        let music_finished = self.position >= self.stream.clip.length();
+        if music_finished && self.correct_sound.as_ref().is_none_or(|track| track.finished()) {
             self.paused = true;
             return None;
         }
-        match self.stream.next() {
+        let effects = self
+            .correct_sound
+            .as_mut()
+            .map(|track| track.sample(self.position, self.stream.rate, self.stream.sr))
+            .unwrap_or(Frame(0., 0.));
+        let frame = if music_finished {
+            Ok(Some(Frame(0., 0.)))
+        } else if self.pitch_enabled {
+            self.stream.next()
+        } else {
+            Ok(self.stream.clip.sample(self.position))
+        };
+        match frame {
             Ok(Some(frame)) => {
-                self.position = (self.position + self.stream.rate / self.stream.sr as f64).min(self.stream.clip.length());
-                Some(frame * self.amplifier)
+                self.position += self.stream.rate / self.stream.sr as f64;
+                let music = self.filter.process(frame) * self.amplifier;
+                Some(Frame(music.0 + effects.0, music.1 + effects.1))
             }
             _ => {
                 self.paused = true;
@@ -220,10 +247,18 @@ enum Backend {
 pub struct Music {
     backend: Backend,
     preserve_pitch: bool,
+    noise_filter: crate::noise_area::audio::LowPassTransition,
 }
 impl Music {
-    pub fn new(audio: &mut AudioManager, clip: AudioClip, params: MusicParams, preserve_pitch: bool) -> Result<Self> {
-        let backend = if !preserve_pitch || (params.playback_rate - 1.).abs() < 1e-6 {
+    pub fn new(
+        audio: &mut AudioManager,
+        clip: AudioClip,
+        params: MusicParams,
+        preserve_pitch: bool,
+        noise_filter: bool,
+        correct_sound: Option<crate::correct_sound::CorrectSoundTrack>,
+    ) -> Result<Self> {
+        let backend = if correct_sound.is_none() && !noise_filter && (!preserve_pitch || (params.playback_rate - 1.).abs() < 1e-6) {
             Backend::Native(audio.create_music(clip, params)?)
         } else {
             let stream = PitchStream::new(clip.clone(), params.playback_rate, clip.sample_rate())?;
@@ -234,6 +269,9 @@ impl Music {
             let (tx, rx) = mpsc::sync_channel(params.command_buffer_size);
             audio.add_renderer(Corrected {
                 stream,
+                pitch_enabled: preserve_pitch && (params.playback_rate - 1.).abs() >= 1e-6,
+                filter: Default::default(),
+                correct_sound,
                 shared: Arc::downgrade(&shared),
                 rx,
                 paused: true,
@@ -242,7 +280,17 @@ impl Music {
             })?;
             Backend::Corrected { shared, tx }
         };
-        Ok(Self { backend, preserve_pitch })
+        Ok(Self {
+            backend,
+            preserve_pitch,
+            noise_filter: Default::default(),
+        })
+    }
+    pub fn set_noise_touch(&mut self, touching: bool, dt: f32) {
+        let cutoff = self.noise_filter.update(touching, dt);
+        if let Backend::Corrected { shared, .. } = &self.backend {
+            shared.cutoff.store(cutoff.to_bits(), Ordering::Relaxed);
+        }
     }
     pub fn preserves_pitch(&self) -> bool {
         self.preserve_pitch
@@ -262,19 +310,23 @@ impl Music {
     pub fn play(&mut self) -> Result<()> {
         match &mut self.backend {
             Backend::Native(m) => m.play(),
-            Backend::Corrected { tx, .. } => Ok(tx.send(Command::Play)?),
+            Backend::Corrected { tx, .. } => Ok(tx.try_send(Command::Play)?),
         }
     }
     pub fn pause(&mut self) -> Result<()> {
         match &mut self.backend {
             Backend::Native(m) => m.pause(),
-            Backend::Corrected { tx, .. } => Ok(tx.send(Command::Pause)?),
+            Backend::Corrected { tx, .. } => Ok(tx.try_send(Command::Pause)?),
         }
     }
     pub fn seek_to(&mut self, time: f64) -> Result<()> {
+        self.noise_filter = Default::default();
+        if let Backend::Corrected { shared, .. } = &self.backend {
+            shared.cutoff.store(0, Ordering::Relaxed);
+        }
         match &mut self.backend {
             Backend::Native(m) => m.seek_to(time),
-            Backend::Corrected { tx, .. } => Ok(tx.send(Command::Seek(time))?),
+            Backend::Corrected { tx, .. } => Ok(tx.try_send(Command::Seek(time))?),
         }
     }
 }
@@ -282,6 +334,22 @@ impl Music {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn full_audio_command_queue_returns_instead_of_blocking_ui() {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        tx.try_send(Command::Pause).unwrap();
+        let mut music = Music {
+            backend: Backend::Corrected {
+                shared: Arc::new(Shared::default()),
+                tx,
+            },
+            preserve_pitch: false,
+            noise_filter: Default::default(),
+        };
+        assert!(music.play().is_err());
+        assert!(music.pause().is_err());
+        assert!(music.seek_to(0.).is_err());
+    }
     fn tone(seconds: f64, sr: u32, frequency: f64) -> AudioClip {
         AudioClip::from_raw(
             (0..(seconds * sr as f64) as usize)
@@ -300,6 +368,9 @@ mod tests {
         (
             Corrected {
                 stream: PitchStream::new(clip, rate, sr).unwrap(),
+                pitch_enabled: true,
+                filter: Default::default(),
+                correct_sound: None,
                 shared: Arc::downgrade(&shared),
                 rx,
                 paused: true,
@@ -310,6 +381,38 @@ mod tests {
             tx,
         )
     }
+    #[test]
+    fn scheduled_effects_share_the_music_clock_and_survive_pause_and_seek() {
+        let sr = 48000;
+        let (mut renderer, shared, tx) = corrected(tone(0.5, sr, 440.), 1.);
+        renderer.pitch_enabled = false;
+        renderer.amplifier = 0.; // Muted music must not mute scheduled hitsounds.
+        let effect = AudioClip::from_raw(vec![Frame(1., 0.5); 480], sr);
+        renderer.correct_sound = Some(crate::correct_sound::CorrectSoundTrack::new(
+            Arc::new(vec![crate::correct_sound::ScheduledHit { time: 0.01, clip: effect }]),
+            0.,
+            0.3,
+        ));
+        tx.try_send(Command::Play).unwrap();
+        let mut first = vec![0.; 4800];
+        renderer.render_stereo(sr, &mut first);
+        let onset = first.chunks_exact(2).position(|frame| frame[0] > 0.1).unwrap();
+        assert!((480..=481).contains(&onset));
+        assert!((first[onset * 2] - 0.3).abs() < 1e-6);
+        assert!((first[onset * 2 + 1] - 0.15).abs() < 1e-6);
+        tx.try_send(Command::Pause).unwrap();
+        let before = renderer.position;
+        let mut paused = vec![0.; 4800];
+        renderer.render_stereo(sr, &mut paused);
+        assert!(paused.iter().all(|value| *value == 0.));
+        assert_eq!(renderer.position, before);
+        tx.try_send(Command::Seek(0.)).unwrap();
+        tx.try_send(Command::Play).unwrap();
+        let mut replay = vec![0.; 4800];
+        renderer.render_stereo(sr, &mut replay);
+        assert_eq!(first, replay);
+        assert!((f64::from_bits(shared.position.load(Ordering::Relaxed)) - 0.05).abs() < 1e-6);
+    }
     fn frequency(data: &[f32], sr: u32) -> f64 {
         let crossings = data.windows(2).filter(|v| v[0] <= 0. && v[1] > 0.).count();
         crossings as f64 * sr as f64 / data.len() as f64
@@ -319,7 +422,7 @@ mod tests {
         let sr = 8000;
         for rate in [0.05, 0.5, 0.75, 1.25, 2., 10.] {
             let (mut r, _shared, tx) = corrected(tone(2., sr, 440.), rate);
-            tx.send(Command::Play).unwrap();
+            tx.try_send(Command::Play).unwrap();
             assert!(r.prepare(sr));
             let mut output = Vec::new();
             while let Some(frame) = r.frame() {
@@ -341,10 +444,10 @@ mod tests {
         let mut out = vec![0.; 1600];
         r.render_stereo(8000, &mut out);
         assert!(out.iter().all(|x| *x == 0.));
-        tx.send(Command::Play).unwrap();
+        tx.try_send(Command::Play).unwrap();
         r.render_stereo(8000, &mut out);
         assert!((r.position - 0.05).abs() < 1e-7);
-        tx.send(Command::Pause).unwrap();
+        tx.try_send(Command::Pause).unwrap();
         r.render_stereo(8000, &mut out);
         assert!((r.position - 0.05).abs() < 1e-7);
         tx.send(Command::Seek(0.6)).unwrap();
@@ -352,14 +455,14 @@ mod tests {
         r.render_stereo(8000, &mut out);
         assert_eq!(r.position, 1.);
         assert_eq!(f64::from_bits(shared.position.load(Ordering::Relaxed)), 1.);
-        tx.send(Command::Play).unwrap();
+        tx.try_send(Command::Play).unwrap();
         r.render_stereo(16000, &mut out);
         assert!((r.position - 1.025).abs() < 1e-7);
-        tx.send(Command::Pause).unwrap();
+        tx.try_send(Command::Pause).unwrap();
         tx.send(Command::Seek(0.)).unwrap();
         r.render_stereo(16000, &mut out);
         assert_eq!(r.position, 0.);
-        tx.send(Command::Play).unwrap();
+        tx.try_send(Command::Play).unwrap();
         r.render_stereo(16000, &mut out);
         assert!((r.position - 0.025).abs() < 1e-7);
     }
@@ -369,7 +472,7 @@ mod tests {
         let mut frames = tone(1., sr, 220.).frames().to_vec();
         frames.extend_from_slice(tone(1., sr, 660.).frames());
         let (mut r, _shared, tx) = corrected(AudioClip::from_raw(frames, sr), 0.5);
-        tx.send(Command::Play).unwrap();
+        tx.try_send(Command::Play).unwrap();
         r.prepare(sr);
         for _ in 0..100 {
             r.frame();

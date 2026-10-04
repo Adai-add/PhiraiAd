@@ -67,6 +67,9 @@ pub enum HitSound {
 
 impl HitSound {
     pub fn play(&self, res: &mut Resource) {
+        if res.config.correct_sound {
+            return;
+        }
         match self {
             HitSound::None => {}
             HitSound::Click => play_sfx(&mut res.sfx_click, &res.config),
@@ -598,6 +601,7 @@ pub(crate) struct JudgeInner {
     max_combo: u32,
     counts: [u32; 4],
     num_of_notes: u32,
+    custom_contribution: Option<f64>,
     early_kind: [u32; 4],
     late_kind: [u32; 4],
 }
@@ -612,6 +616,7 @@ impl JudgeInner {
             max_combo: 0,
             counts: [0; 4],
             num_of_notes,
+            custom_contribution: None,
             early_kind: [0; 4],
             late_kind: [0; 4],
         }
@@ -646,12 +651,16 @@ impl JudgeInner {
         self.max_combo = 0;
         self.counts = [0; 4];
         self.diffs.clear();
+        self.custom_contribution = None;
         self.early_kind = [0; 4];
         self.late_kind = [0; 4];
     }
 
     pub fn accuracy(&self) -> f64 {
-        (self.counts[0] as f64 + self.counts[1] as f64 * 0.65) / self.num_of_notes as f64
+        if self.num_of_notes == 0 {
+            return 1.;
+        }
+        self.custom_contribution.unwrap_or(self.counts[0] as f64 + self.counts[1] as f64 * 0.65) / self.num_of_notes as f64
     }
 
     pub fn real_time_accuracy(&self) -> f64 {
@@ -659,12 +668,15 @@ impl JudgeInner {
         if cnt == 0 {
             return 1.;
         }
-        (self.counts[0] as f64 + self.counts[1] as f64 * 0.65) / cnt as f64
+        self.custom_contribution.unwrap_or(self.counts[0] as f64 + self.counts[1] as f64 * 0.65) / cnt as f64
     }
 
     pub fn score(&self) -> u32 {
         const TOTAL: u32 = 1000000;
-        if self.counts[0] == self.num_of_notes {
+        if self.num_of_notes == 0 {
+            return 0;
+        }
+        if self.custom_contribution.is_none() && self.counts[0] == self.num_of_notes {
             TOTAL
         } else {
             let score = (0.9 * self.accuracy() + self.max_combo as f64 / self.num_of_notes as f64 * 0.1) * TOTAL as f64;
@@ -732,7 +744,7 @@ pub struct Judge {
     active_fingers: HashMap<u64, Vec2>,
 
     /// Finger ids currently inside a chart block area.
-    noise_state: NoiseAreaState,
+    pub noise_state: NoiseAreaState,
 
     // FingerManagement uses a persistent List<Fingers>, so simultaneous
     // fingers are always processed in insertion order rather than hash order.
@@ -867,7 +879,7 @@ impl Judge {
         }
         self.trackers.clear();
         self.active_fingers.clear();
-        self.noise_state.blocked_ids.clear();
+        self.noise_state.clear();
         self.finger_order.clear();
         self.official_tracker_clock = 0.;
     }
@@ -893,6 +905,36 @@ impl Judge {
     /// engine.  Debug drawing reads this snapshot so strict-mode frame
     /// compensation cannot drift away from the real judge.
     pub fn judgement_range_profile(&self, config: &Config) -> JudgementRangeProfile {
+        if config.judgement_mode == JudgementMode::Custom {
+            let scheme = config.custom_judgement.effective();
+            let n = scheme.bands.len();
+            let perfect = JudgementTimeWindow {
+                early: scheme.boundaries_ms[n / 2] / 1000.,
+                late: -scheme.boundaries_ms[n / 2 + 1] / 1000.,
+            };
+            let good = JudgementTimeWindow {
+                early: scheme.boundaries_ms[1] / 1000.,
+                late: -scheme.boundaries_ms[n - 1] / 1000.,
+            };
+            let outer = JudgementTimeWindow {
+                early: scheme.boundaries_ms[0] / 1000.,
+                late: -scheme.boundaries_ms[n - 1] / 1000.,
+            };
+            return JudgementRangeProfile {
+                tap_perfect: perfect,
+                tap_good: good,
+                tap_outer: outer,
+                hold_perfect: perfect,
+                hold_outer: outer,
+                drag_outer: outer,
+                flick_outer: outer,
+                hold_tail: PHIGROS_HOLD_TAIL,
+                tap_x: PHIRA_X_MAX,
+                hold_x: PHIRA_X_MAX,
+                drag_x: 2.1 * self.replica_world_unit,
+                flick_x: 2.1 * self.replica_world_unit,
+            };
+        }
         let other_phigros = config.judgement_mode == JudgementMode::PhigrosReplica;
         let flick_phigros = config.flick_judgement_mode() == JudgementMode::PhigrosReplica;
         let windows = if config.phigros_strict_judgement && (other_phigros || flick_phigros) {
@@ -1097,13 +1139,17 @@ impl Judge {
     pub fn update(&mut self, res: &mut Resource, chart: &mut Chart, bad_notes: &mut Vec<BadNote>) {
         let touch_debug_enabled = res.config.touch_input_debug_report;
         self.set_touch_debug_enabled(touch_debug_enabled);
+        if res.config.judgement_mode == JudgementMode::Custom && self.inner.custom_contribution.is_none() {
+            self.inner.custom_contribution = Some(0.);
+        }
         if res.config.autoplay() {
             self.auto_play_update(res, chart);
             return;
         }
         const X_DIFF_MAX: f64 = PHIRA_X_MAX;
         let other_official = res.config.judgement_mode == JudgementMode::PhigrosReplica;
-        let flick_official = res.config.flick_judgement_mode() == JudgementMode::PhigrosReplica;
+        let persistent_input = other_official || res.config.judgement_mode == JudgementMode::Custom;
+        let flick_official = res.config.flick_judgement_mode() == JudgementMode::PhigrosReplica || res.config.judgement_mode == JudgementMode::Custom;
         let strict_official = res.config.phigros_strict_judgement && (other_official || flick_official);
         if strict_official {
             self.recent_frame_times.push(get_frame_time() as f64);
@@ -1203,17 +1249,7 @@ impl Judge {
                 })
                 .collect()
         };
-        let any_official = other_official || flick_official;
-        if res.config.noise_area.enabled && !chart.extra.block_areas.is_empty() {
-            let aspect = get_viewport().2 as f32 / get_viewport().3.max(1) as f32;
-            let points = touches.values().map(|touch| {
-                (touch.id, vec2((touch.position.x / aspect + 1.) * 0.5, (touch.position.y + 1.) * 0.5))
-            }).collect::<Vec<_>>();
-            self.noise_state.update(&chart.extra.block_areas, &points, t as f32, true);
-            touches.retain(|id, _| !self.noise_state.is_blocked(*id));
-        } else {
-            self.noise_state.blocked_ids.clear();
-        }
+        let any_official = persistent_input || flick_official;
         let active_snapshot_ids: HashSet<u64> = touches
             .values()
             .filter(|touch| matches!(touch.phase, TouchPhase::Started | TouchPhase::Moved | TouchPhase::Stationary))
@@ -1226,7 +1262,7 @@ impl Judge {
         // Phigros-Flick/Phira-other setup. Keep it out of the passive touch
         // list so changing the Flick engine cannot change Phira Drag/Hold.
         let mut extra_flick_touches = HashMap::new();
-        if other_official {
+        if persistent_input {
             // Seed and refresh positions from the persistent snapshot, but do
             // not use absence from one frame as a release.  Explicit terminal
             // events below and lifecycle-boundary cleanup are authoritative.
@@ -1245,6 +1281,14 @@ impl Judge {
                 (events, 0, 0)
             }
         });
+        let mut noise_live_ids = active_snapshot_ids.clone();
+        for e in &events {
+            if matches!(e.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                noise_live_ids.remove(&e.id);
+            } else {
+                noise_live_ids.insert(e.id);
+            }
+        }
         let raw_key_delta = key_delta;
         self.key_down_count = self.key_down_count.saturating_add_signed(key_delta);
         let mut debug_raw_events = Vec::new();
@@ -1320,7 +1364,7 @@ impl Judge {
                         TouchPhase::Ended | TouchPhase::Cancelled => forget_finger(&mut self.finger_order, id),
                     }
                 }
-                if other_official {
+                if persistent_input {
                     update_active_finger(&mut self.active_fingers, id, phase, judge_point);
                 }
                 match phase {
@@ -1334,7 +1378,7 @@ impl Judge {
                         if flick_official {
                             official_started.insert(id);
                         }
-                        if other_official {
+                        if persistent_input {
                             touches.entry(id).or_insert(transformed_touch).phase = TouchPhase::Started;
                         } else {
                             // Keep the original Phira fallback path byte-for-byte
@@ -1357,7 +1401,7 @@ impl Judge {
                             }
                         }
                         if flick_official && !touches.contains_key(&id) {
-                            if other_official {
+                            if persistent_input {
                                 touches.insert(id, transformed_touch);
                             } else {
                                 extra_flick_touches.insert(id, transformed_touch);
@@ -1439,6 +1483,26 @@ impl Judge {
             };
             it
         };
+        // Filter after all raw events and persistent snapshots have been merged.
+        let mut noise_touches: Vec<_> = touches
+            .values()
+            .chain(extra_flick_touches.values())
+            .filter(|touch| !matches!(touch.phase, TouchPhase::Ended | TouchPhase::Cancelled))
+            .filter(|touch| noise_live_ids.contains(&touch.id))
+            .map(|touch| (touch.id, vec2(touch.position.x * 5. * res.aspect_ratio, -touch.position.y * 5. * res.aspect_ratio)))
+            .collect();
+        noise_touches.sort_by_key(|(id, _)| *id);
+        noise_touches.dedup_by_key(|(id, _)| *id);
+        self.noise_state.update(
+            &chart.extra.block_areas,
+            &noise_touches,
+            t as f32,
+            res.aspect_ratio,
+            res.config.noise_area.enabled,
+            get_frame_time(),
+        );
+        touches.retain(|id, _| !self.noise_state.is_blocked(*id));
+        extra_flick_touches.retain(|id, _| !self.noise_state.is_blocked(*id));
         let mut event_touch_map = touches.clone();
         event_touch_map.extend(extra_flick_touches);
         let touches = if any_official {
@@ -1494,7 +1558,9 @@ impl Judge {
             );
             active_pos.push(
                 self.active_fingers
-                    .values()
+                    .iter()
+                    .filter(|(id, _)| !self.noise_state.is_blocked(**id))
+                    .map(|(_, p)| p)
                     .filter_map(|p| finite_point(inv.transform_point(&Point::new(p.x, -p.y))))
                     .collect(),
             );
@@ -1508,7 +1574,9 @@ impl Judge {
         };
         let mut judgements = Vec::new();
         let mut hold_head_effects = Vec::new();
-        if other_official {
+        if res.config.judgement_mode == JudgementMode::Custom {
+            self.custom_step(res, chart, &event_touches, &event_pos, &active_pos, keys_down, &mut judgements, &mut hold_head_effects);
+        } else if other_official {
             for entry in &mut self.replica.notes {
                 let note = &mut chart.lines[entry.line_id].notes[entry.note_id as usize];
                 note.object.translation.0.set_time(t);
@@ -1567,7 +1635,7 @@ impl Judge {
                             perfect,
                             (t - entry.time) / spd,
                         );
-                        hold_head_effects.push((entry.line_id, entry.note_id, perfect));
+                        hold_head_effects.push((entry.line_id, entry.note_id, perfect, None));
                     }
                     replica::Event::Final { index, outcome, hit_time } => {
                         let entry = &self.replica.notes[index];
@@ -1697,7 +1765,7 @@ impl Judge {
                                         dt <= LIMIT_PERFECT,
                                         (t - note.time) / spd,
                                     );
-                                    hold_head_effects.push((line_id, id, dt <= LIMIT_PERFECT));
+                                    hold_head_effects.push((line_id, id, dt <= LIMIT_PERFECT, None));
                                     note.judge = JudgeStatus::Hold(dt <= LIMIT_PERFECT, t, t, false, f64::INFINITY, 2, false);
                                 }
                                 _ => unreachable!(),
@@ -1772,7 +1840,7 @@ impl Judge {
                                     dt <= perfect_limit,
                                     (t - note.time) / spd,
                                 );
-                                hold_head_effects.push((line_id, id, dt <= perfect_limit));
+                                hold_head_effects.push((line_id, id, dt <= perfect_limit, None));
                                 note.judge = JudgeStatus::Hold(dt <= perfect_limit, t, t, false, f64::INFINITY, 2, false);
                             }
                             _ => unreachable!(),
@@ -1883,7 +1951,7 @@ impl Judge {
                 }
             }
         }
-        for (judgement, line_id, id, diff) in judgements {
+        for (mut judgement, line_id, id, diff) in judgements {
             let line = &mut chart.lines[line_id];
             let note = &mut line.notes[id as usize];
             line.object.set_time(t);
@@ -1891,13 +1959,47 @@ impl Judge {
             let line = &chart.lines[line_id];
             let note = &line.notes[id as usize];
             let line_tr = line.now_transform(res, &chart.lines);
+            let custom_offset = if res.config.judgement_mode == JudgementMode::Custom {
+                let scheme = res.config.custom_judgement.effective();
+                let offset = (note.time - diff.unwrap_or(t)) / spd * 1000.;
+                let stage = if judgement == Judgement::Miss {
+                    scheme.bands.len() - 1
+                } else if matches!(note.kind, NoteKind::Drag | NoteKind::Flick) {
+                    scheme.bands.len() / 2
+                } else {
+                    scheme.classify(offset).unwrap_or(scheme.bands.len() - 1)
+                };
+                judgement = scheme.outcome(stage);
+                if let Some(sum) = &mut self.inner.custom_contribution {
+                    *sum += scheme.bands[stage].contribution;
+                }
+                Some(if judgement == Judgement::Miss {
+                    scheme.boundaries_ms[scheme.bands.len() - 1]
+                } else {
+                    offset
+                })
+            } else {
+                None
+            };
+            let effect_offset = if res.config.judgement_mode == JudgementMode::Custom
+                && matches!(note.kind, NoteKind::Drag | NoteKind::Flick)
+                && judgement == Judgement::Perfect
+            {
+                let scheme = res.config.custom_judgement.effective();
+                let mid = scheme.bands.len() / 2;
+                Some(scheme.boundaries_ms[mid] * 0.5 + scheme.boundaries_ms[mid + 1] * 0.5)
+            } else {
+                custom_offset
+            };
             self.commit(
                 t,
                 judgement,
                 line_id as _,
                 id,
                 if matches!(judgement, Judgement::Miss) {
-                    0.25
+                    custom_offset.map_or(0.25, |offset| -offset / 1000.)
+                } else if custom_offset.is_some() {
+                    -custom_offset.unwrap() / 1000.
                 } else if matches!(note.kind, NoteKind::Drag | NoteKind::Flick) {
                     0.
                 } else {
@@ -1910,13 +2012,13 @@ impl Judge {
             if match judgement {
                 Judgement::Perfect => {
                     res.with_model(line_tr * note.object.now(res), |res| {
-                        res.emit_at_origin(note.rotation(line), note.fx_color.unwrap_or_else(|| res.res_pack.info.fx_perfect()))
+                        res.emit_judgement_effect(note.rotation(line), note.fx_color.unwrap_or_else(|| res.res_pack.info.fx_perfect()), effect_offset)
                     });
                     true
                 }
                 Judgement::Good => {
                     res.with_model(line_tr * note.object.now(res), |res| {
-                        res.emit_at_origin(note.rotation(line), note.fx_color.unwrap_or_else(|| res.res_pack.info.fx_good()))
+                        res.emit_judgement_effect(note.rotation(line), note.fx_color.unwrap_or_else(|| res.res_pack.info.fx_good()), effect_offset)
                     });
                     true
                 }
@@ -2022,12 +2124,235 @@ impl Judge {
         self.last_time = t / spd;
     }
 
+    /// Ordered custom windows use signed real-time milliseconds for every note head.
+    /// Input collection, noise-area blocking and flick trackers are shared with normal play.
+    fn custom_step(
+        &mut self,
+        res: &mut Resource,
+        chart: &mut Chart,
+        touches: &[Touch],
+        event_pos: &[Vec<Option<Point>>],
+        held: &[Vec<Point>],
+        keys: u32,
+        out: &mut Vec<(Judgement, usize, u32, Option<f64>)>,
+        heads: &mut Vec<(usize, u32, bool, Option<f64>)>,
+    ) {
+        let t = res.time;
+        let speed = res.config.speed as f64;
+        let scheme = res.config.custom_judgement.effective();
+        let count = scheme.bands.len();
+        let boundaries: [f64; 9] = std::array::from_fn(|i| scheme.boundaries_ms.get(i).copied().unwrap_or(f64::NEG_INFINITY));
+        let classify = |offset: f64| -> Option<usize> {
+            if !offset.is_finite() || offset > boundaries[0] {
+                None
+            } else {
+                boundaries[..count].iter().rposition(|b| offset <= *b)
+            }
+        };
+        let outcome = |stage: usize| {
+            if stage == 0 {
+                Judgement::Bad
+            } else if stage == count - 1 {
+                Judgement::Miss
+            } else if stage == count / 2 {
+                Judgement::Perfect
+            } else {
+                Judgement::Good
+            }
+        };
+        let latest = boundaries[count - 1];
+        // Do not expire at the render clock until timestamped input is considered.
+        for event in 0..touches.len() + keys as usize {
+            let keyboard = event >= touches.len();
+            let touch = if keyboard { None } else { Some(&touches[event]) };
+            let click = keyboard || touch.is_some_and(|x| x.phase == TouchPhase::Started);
+            if !click {
+                continue;
+            }
+            let hit = touch.map_or(t, |x| if x.time.is_finite() { x.time } else { t });
+            let mut best: Option<(f64, usize, u32, usize)> = None;
+            for (line_id, (line, (ids, start))) in chart.lines.iter_mut().zip(&self.notes).enumerate() {
+                for &id in &ids[*start..] {
+                    let note = &mut line.notes[id as usize];
+                    if !matches!(note.judge, JudgeStatus::NotJudged) {
+                        continue;
+                    }
+                    if !matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. }) {
+                        continue;
+                    }
+                    let offset = (note.time - hit) / speed * 1000.;
+                    if offset > boundaries[0] {
+                        break;
+                    }
+                    let Some(stage) = classify(offset) else {
+                        continue;
+                    };
+                    if stage == count - 1 {
+                        continue;
+                    }
+                    note.object.translation.0.set_time(hit);
+                    if !keyboard {
+                        let Some(p) = event_pos[line_id][event] else {
+                            continue;
+                        };
+                        if (note.object.translation.0.now() - p.x).abs() as f64 / note.judge_area as f64 > PHIRA_X_MAX {
+                            continue;
+                        }
+                    }
+                    let key = offset.abs();
+                    if best.is_none_or(|b| key < b.0) {
+                        best = Some((key, line_id, id, stage));
+                    }
+                }
+            }
+            if let Some((_, line_id, id, stage)) = best {
+                let note = &mut chart.lines[line_id].notes[id as usize];
+                let result = outcome(stage);
+                if matches!(note.kind, NoteKind::Hold { .. }) && matches!(result, Judgement::Perfect | Judgement::Good) {
+                    let perfect = result == Judgement::Perfect;
+                    note.judge = JudgeStatus::Hold(perfect, hit, hit, false, f64::INFINITY, 2, false);
+                    note.hitsound.play(res);
+                    Self::commit_hold_head(&self.judgements, &self.report_judgements, t, line_id as _, id, perfect, (hit - note.time) / speed);
+                    heads.push((line_id, id, perfect, Some((note.time - hit) / speed * 1000.)));
+                } else {
+                    note.judge = JudgeStatus::Judged;
+                    out.push((result, line_id, id, Some(hit)));
+                }
+                if matches!(note.kind, NoteKind::Flick) {
+                    if let Some(x) = touch.and_then(|x| self.trackers.get_mut(&x.id)) {
+                        x.consume();
+                    }
+                }
+            }
+        }
+        for (line_id, (line, (ids, start))) in chart.lines.iter_mut().zip(&self.notes).enumerate() {
+            for &id in &ids[*start..] {
+                let note = &mut line.notes[id as usize];
+                if matches!(note.kind, NoteKind::Drag | NoteKind::Flick) {
+                    continue;
+                }
+                let offset = (note.time - t) / speed * 1000.;
+                match note.judge {
+                    JudgeStatus::Hold(perfect, _, head, ref mut armed, ref mut up, _, _) => {
+                        let NoteKind::Hold { end_time, .. } = note.kind else {
+                            continue;
+                        };
+                        note.object.translation.0.set_time(t);
+                        let present = self.key_down_count != 0
+                            || held[line_id]
+                                .iter()
+                                .any(|p| (note.object.translation.0.now() - p.x).abs() as f64 / note.judge_area as f64 <= PHIRA_X_MAX);
+                        if (end_time - t) / speed <= PHIGROS_HOLD_TAIL {
+                            *armed = true;
+                        }
+                        if !*armed {
+                            if present {
+                                *up = f64::INFINITY;
+                            } else if up.is_infinite() {
+                                *up = t;
+                            } else if (t - *up) / speed > UP_TOLERANCE {
+                                note.judge = JudgeStatus::Judged;
+                                out.push((Judgement::Miss, line_id, id, None));
+                                continue;
+                            }
+                        }
+                        if t >= end_time {
+                            note.judge = JudgeStatus::Judged;
+                            out.push((if perfect { Judgement::Perfect } else { Judgement::Good }, line_id, id, Some(head)));
+                        }
+                    }
+                    JudgeStatus::NotJudged => {
+                        if offset > boundaries[0] {
+                            break;
+                        }
+                        if offset <= latest {
+                            note.judge = JudgeStatus::Judged;
+                            out.push((Judgement::Miss, line_id, id, None));
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let unit = self.replica_world_unit;
+        for entry in &mut self.replica.notes {
+            let note = &mut chart.lines[entry.line_id].notes[entry.note_id as usize];
+            if !matches!(note.kind, NoteKind::Drag | NoteKind::Flick) || matches!(note.judge, JudgeStatus::Judged) {
+                entry.skip();
+                continue;
+            }
+            note.object.translation.0.set_time(t);
+            entry.x = note.object.translation.0.now() as f64 / unit;
+        }
+        let fingers: Vec<_> = touches
+            .iter()
+            .enumerate()
+            .map(|(i, touch)| replica::Finger {
+                click: false,
+                flick: matches!(touch.phase, TouchPhase::Moved | TouchPhase::Stationary) && self.trackers.get(&touch.id).is_some_and(|x| x.flicked),
+                positions: event_pos
+                    .iter()
+                    .map(|line| line[i].map(|p| [p.x as f64 / unit, p.y as f64 / unit]))
+                    .collect(),
+            })
+            .collect();
+        let positions: Vec<_> = held
+            .iter()
+            .map(|line| line.iter().map(|p| [p.x as f64 / unit, p.y as f64 / unit]).collect())
+            .collect();
+        let result = self.replica.step_custom_gestures(
+            replica::Frame {
+                now: t,
+                speed,
+                windows: replica::Windows {
+                    perfect: 0.08,
+                    good: 0.18,
+                    bad: 0.22,
+                    flick: 0.14,
+                },
+                fingers: &fingers,
+                held_positions: &positions,
+                keyboard_clicks: 0,
+                keyboard_held: self.key_down_count != 0,
+            },
+            boundaries[0] / 1000.,
+            latest / 1000.,
+        );
+        for i in result.consumed_fingers {
+            if let Some(tracker) = self.trackers.get_mut(&touches[i].id) {
+                tracker.consume();
+            }
+        }
+        for event in result.events {
+            if let replica::Event::Final { index, outcome, hit_time } = event {
+                let entry = &self.replica.notes[index];
+                let judgement = if outcome == replica::Outcome::Miss {
+                    Judgement::Miss
+                } else {
+                    Judgement::Perfect
+                };
+                chart.lines[entry.line_id].notes[entry.note_id as usize].judge = JudgeStatus::Judged;
+                out.push((judgement, entry.line_id, entry.note_id, hit_time));
+            }
+        }
+        for entry in &self.replica.notes {
+            let note = &mut chart.lines[entry.line_id].notes[entry.note_id as usize];
+            if matches!(note.kind, NoteKind::Drag | NoteKind::Flick) && !matches!(note.judge, JudgeStatus::Judged) {
+                note.judge = match entry.visual(t, speed, 0.18) {
+                    replica::Visual::Armed => JudgeStatus::PreJudge,
+                    _ => JudgeStatus::NotJudged,
+                };
+            }
+        }
+    }
+
     /// Consume only newly committed heads; held frames and tail outcomes never enter this list.
-    fn emit_hold_head_effects(res: &mut Resource, chart: &mut Chart, heads: Vec<(usize, u32, bool)>) {
+    fn emit_hold_head_effects(res: &mut Resource, chart: &mut Chart, heads: Vec<(usize, u32, bool, Option<f64>)>) {
         if !res.config.hold_head_effect || !res.config.particle {
             return;
         }
-        for (line_id, id, perfect) in heads {
+        for (line_id, id, perfect, head_offset) in heads {
             let line = &mut chart.lines[line_id];
             line.object.set_time(res.time);
             let note = &mut line.notes[id as usize];
@@ -2050,7 +2375,10 @@ impl Judge {
                     res.res_pack.info.fx_good()
                 }
             });
-            res.with_model(transform, |res| res.emit_at_origin(note.rotation(line), color));
+            // Capture the head offset with the event: a very short/late Hold
+            // may already be finished before this effect batch is emitted.
+            let custom_offset = head_offset;
+            res.with_model(transform, |res| res.emit_judgement_effect(note.rotation(line), color, custom_offset));
         }
     }
 
@@ -2080,8 +2408,29 @@ impl Judge {
                 note.judge = if matches!(note.kind, NoteKind::Hold { .. }) {
                     note.hitsound.play(res);
                     Self::commit_hold_head(&self.judgements, &self.report_judgements, t, line_id as _, *id, true, 0.);
-                    hold_head_effects.push((line_id, *id, true));
-                    JudgeStatus::Hold(true, t, (t - note.time) / spd, false, f64::INFINITY, 2, false)
+                    hold_head_effects.push((
+                        line_id,
+                        *id,
+                        true,
+                        if res.config.judgement_mode == JudgementMode::Custom {
+                            Some(0.)
+                        } else {
+                            None
+                        },
+                    ));
+                    JudgeStatus::Hold(
+                        true,
+                        t,
+                        if res.config.judgement_mode == JudgementMode::Custom {
+                            note.time
+                        } else {
+                            (t - note.time) / spd
+                        },
+                        false,
+                        f64::INFINITY,
+                        2,
+                        false,
+                    )
                 } else {
                     judgements.push((line_id, *id));
                     JudgeStatus::Judged
@@ -2096,7 +2445,21 @@ impl Judge {
         }
         Self::emit_hold_head_effects(res, chart, hold_head_effects);
         for (line_id, id) in judgements.into_iter() {
-            self.commit(t, Judgement::Perfect, line_id as _, id, 0.);
+            let outcome = if res.config.judgement_mode == JudgementMode::Custom {
+                let scheme = res.config.custom_judgement.effective();
+                let stage = if matches!(chart.lines[line_id].notes[id as usize].kind, NoteKind::Drag | NoteKind::Flick) {
+                    scheme.bands.len() / 2
+                } else {
+                    scheme.classify(0.).unwrap_or(scheme.bands.len() - 1)
+                };
+                if let Some(sum) = &mut self.inner.custom_contribution {
+                    *sum += scheme.bands[stage].contribution;
+                }
+                scheme.outcome(stage)
+            } else {
+                Judgement::Perfect
+            };
+            self.commit(t, outcome, line_id as _, id, 0.);
             let (note_transform, note_hitsound) = {
                 let line = &mut chart.lines[line_id];
                 let note = &mut line.notes[id as usize];
@@ -2107,7 +2470,21 @@ impl Judge {
             };
             let line = &chart.lines[line_id];
             res.with_model(line.now_transform(res, &chart.lines) * note_transform, |res| {
-                res.emit_at_origin(line.notes[id as usize].rotation(line), res.res_pack.info.fx_perfect())
+                res.emit_judgement_effect(
+                    line.notes[id as usize].rotation(line),
+                    res.res_pack.info.fx_perfect(),
+                    if res.config.judgement_mode == JudgementMode::Custom {
+                        let scheme = res.config.custom_judgement.effective();
+                        if matches!(line.notes[id as usize].kind, NoteKind::Drag | NoteKind::Flick) {
+                            let mid = scheme.bands.len() / 2;
+                            Some(scheme.boundaries_ms[mid] * 0.5 + scheme.boundaries_ms[mid + 1] * 0.5)
+                        } else {
+                            Some(0.)
+                        }
+                    } else {
+                        None
+                    },
+                )
             });
             if !matches!(chart.lines[line_id].notes[id as usize].kind, NoteKind::Hold { .. }) {
                 note_hitsound.play(res);
@@ -2478,6 +2855,43 @@ mod replica_input_tests {
         }
         frames.push(0.02);
         assert!((frames.average() - 0.011).abs() < 1e-12);
+    }
+
+    #[test]
+    fn custom_acc_counts_all_bands_and_has_no_all_perfect_override() {
+        let scheme = crate::custom_judgement::Scheme::new(9);
+        let mut inner = JudgeInner::new(9);
+        inner.custom_contribution = Some(0.);
+        for i in 0..9 {
+            inner.commit(scheme.outcome(i), if i < 4 { -0.1 } else { 0.1 });
+            *inner.custom_contribution.as_mut().unwrap() += scheme.bands[i].contribution;
+        }
+        assert!((inner.accuracy() - 4.6 / 9.).abs() < 1e-12);
+        assert!((inner.result().accuracy - 4.6 / 9.).abs() < 1e-12);
+        assert_eq!(inner.counts(), [1, 6, 1, 1]);
+        inner.reset();
+        assert_eq!(inner.custom_contribution, None);
+        let mut inner = JudgeInner::new(2);
+        inner.custom_contribution = Some(0.);
+        inner.commit(Judgement::Perfect, 0.);
+        *inner.custom_contribution.as_mut().unwrap() += 0.5;
+        assert_eq!(inner.real_time_accuracy(), 0.5);
+        inner.commit(Judgement::Perfect, 0.);
+        *inner.custom_contribution.as_mut().unwrap() += 0.5;
+        assert_eq!(inner.accuracy(), 0.5);
+        assert_eq!(inner.score(), 550000);
+    }
+    #[test]
+    fn custom_windows_have_no_phira_late_compensation() {
+        let chart = Chart::new(0., Vec::new(), Default::default(), Default::default(), Default::default(), Default::default());
+        let judge = Judge::new(&chart);
+        let mut config = Config::default();
+        config.judgement_mode = JudgementMode::Custom;
+        config.custom_judgement.current = crate::custom_judgement::Scheme::new(9);
+        let profile = judge.judgement_range_profile(&config);
+        assert_eq!(profile.tap_perfect, JudgementTimeWindow::symmetric(0.08));
+        assert_eq!(profile.tap_outer, JudgementTimeWindow { early: 0.18, late: 0.165 });
+        assert!(config.blocks_score_upload());
     }
 
     #[test]

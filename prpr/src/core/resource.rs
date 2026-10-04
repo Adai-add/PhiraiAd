@@ -418,6 +418,7 @@ pub struct Resource {
     /// Input-space half-turn; drawing uses a final framebuffer rotation.
     pub auto_flip_y: bool,
     pub rotate_chart: bool,
+    pub has_noise_area: bool,
 
     pub time: f64,
 
@@ -544,6 +545,7 @@ impl Resource {
             practice_view: Default::default(),
             auto_flip_y: false,
             rotate_chart: false,
+            has_noise_area: false,
 
             time: 0.,
 
@@ -586,6 +588,30 @@ impl Resource {
         self.audio.create_sfx(clip, Some(BUFFER_SIZE))
     }
 
+    pub fn emit_judgement_effect(&mut self, rotation: f32, fallback: Color, early_ms: Option<f64>) {
+        let Some(offset) = early_ms else {
+            self.emit_at_origin(rotation, fallback);
+            return;
+        };
+        let scheme = self.config.custom_judgement.effective();
+        let Some(stage) = scheme.classify(offset) else {
+            return;
+        };
+        let band = &scheme.bands[stage];
+        if stage == 0 || stage == scheme.bands.len() - 1 || !band.effect_enabled {
+            return;
+        }
+        let color = Color::from_rgba(band.color[0], band.color[1], band.color[2], band.color[3]);
+        let multiplier = band.effect_size;
+        let main_size = self.emitter.emitter.config.size;
+        let square_size = self.emitter.emitter_square.config.size;
+        self.emitter.emitter.config.size = main_size * multiplier;
+        self.emitter.emitter_square.config.size = square_size * multiplier;
+        self.emit_at_origin(rotation, color);
+        self.emitter.emitter.config.size = main_size;
+        self.emitter.emitter_square.config.size = square_size;
+    }
+
     pub fn emit_at_origin(&mut self, rotation: f32, color: Color) {
         if !self.config.particle {
             return;
@@ -603,7 +629,7 @@ impl Resource {
             return false;
         }
         self.last_vp = vp;
-        if !self.no_effect || self.config.sample_count != 1 || self.rotate_chart {
+        if !self.no_effect || self.config.sample_count != 1 || self.rotate_chart || self.has_noise_area {
             self.chart_target = Some(MSRenderTarget::new((vp.2 as u32, vp.3 as u32), self.config.sample_count));
         }
         fn viewport(aspect_ratio: f32, (x, y, w, h): (i32, i32, i32, i32)) -> (i32, i32, i32, i32) {

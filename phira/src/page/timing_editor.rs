@@ -147,8 +147,12 @@ impl Page for TimingEditor {
                 profile.tap_perfect.late
             };
             let good = if diff < 0. { profile.tap_good.early } else { profile.tap_good.late };
+            let custom =
+                (get_data().config.judgement_mode == prpr::config::JudgementMode::Custom).then(|| get_data().config.custom_judgement.effective());
             let j = if miss {
                 Judgement::Miss
+            } else if let Some(scheme) = custom {
+                scheme.classify(-diff * 1000.).map_or(Judgement::Bad, |stage| scheme.outcome(stage))
             } else if diff.abs() <= perfect {
                 Judgement::Perfect
             } else if diff.abs() <= good {
@@ -156,7 +160,7 @@ impl Page for TimingEditor {
             } else {
                 Judgement::Bad
             };
-            self.preview.record(
+            self.preview.record_scaled(
                 &JudgeReportEvent {
                     time: s.t as f64,
                     line_id: 0,
@@ -167,6 +171,7 @@ impl Page for TimingEditor {
                 &NoteKind::Click,
                 &self.draft,
                 s.rt as f64,
+                timing_bar::extent(custom),
             );
         }
         self.preview.animate(s.rt as f64, &self.draft);
@@ -195,7 +200,13 @@ impl Page for TimingEditor {
             // Editing must show the bar even when its gameplay switch is off.
             let mut preview_config = self.draft.clone();
             preview_config.enabled = true;
-            timing_bar::render(ui, &preview_config, &self.preview, &profile);
+            timing_bar::render(
+                ui,
+                &preview_config,
+                &self.preview,
+                &profile,
+                (get_data().config.judgement_mode == prpr::config::JudgementMode::Custom).then(|| get_data().config.custom_judgement.effective()),
+            );
             if ui.button("timing_editor_controls", Rect::new(-0.95, top - 0.075, 0.25, 0.06), if self.controls { "隐藏面板" } else { "显示面板" })
             {
                 self.controls ^= true;

@@ -11,8 +11,8 @@ use crate::{
         Object, HEIGHT_RATIO,
     },
     ext::NotNanExt,
-    noise_area::BlockArea,
     judge::{HitSound, JudgeStatus},
+    noise_area::BlockArea,
 };
 
 #[derive(Deserialize)]
@@ -272,7 +272,9 @@ pub fn parse_phigros(source: &str, mut extra: ChartExtra) -> Result<Chart> {
     let pgr: PgrChart = serde_json::from_str(source).with_context(|| ptl!("json-parse-failed"))?;
     let format_version = pgr.format_version;
     let mut block_areas = pgr.block_area_list;
-    for area in &mut block_areas { area.normalize(); }
+    for area in &mut block_areas {
+        area.normalize()?;
+    }
     let max_time = *pgr
         .judge_line_list
         .iter()
