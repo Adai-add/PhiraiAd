@@ -316,12 +316,10 @@ impl GameScene {
         }
         let effects = std::mem::take(&mut chart.extra.global_effects);
         if config.fxaa {
-            #[cfg(feature = "log")]
-            crate::log::startup_checkpoint("shader FXAA initialization");
-            match Effect::new(0.0..f64::INFINITY, include_str!("fxaa.glsl"), Vec::new(), false) {
-                Ok(effect) => chart.extra.effects.push(effect),
-                Err(err) => tracing::warn!(?err, "FXAA shader initialization failed; skipping anti-aliasing"),
-            }
+            chart
+                .extra
+                .effects
+                .push(Effect::new(0.0..f64::INFINITY, include_str!("fxaa.glsl"), Vec::new(), false).unwrap());
         }
 
         if config.has_mod(Mods::NIGHTCORE) {
@@ -329,12 +327,10 @@ impl GameScene {
         }
 
         if config.has_mod(Mods::RAINBOW) {
-            #[cfg(feature = "log")]
-            crate::log::startup_checkpoint("shader rainbow initialization");
-            match Effect::new(0.0..f64::INFINITY, include_str!("rainbow.glsl"), Vec::new(), false) {
-                Ok(effect) => chart.extra.effects.push(effect),
-                Err(err) => tracing::warn!(?err, "Rainbow shader initialization failed; skipping rainbow effect"),
-            }
+            chart
+                .extra
+                .effects
+                .push(Effect::new(0.0..f64::INFINITY, include_str!("rainbow.glsl"), Vec::new(), false).unwrap());
         }
 
         let info_offset = info.offset;
@@ -353,7 +349,7 @@ impl GameScene {
         res.has_noise_area = res.config.noise_area.enabled && !chart.extra.block_areas.is_empty();
         let noise_renderer = if res.has_noise_area {
             Some(
-                crate::noise_area::render::NoiseRenderer::new()
+                crate::noise_area::render::NoiseRenderer::new(res.config.noise_area.low_performance)
                     .await
                     .context("Failed to initialize noise-area renderer")?,
             )

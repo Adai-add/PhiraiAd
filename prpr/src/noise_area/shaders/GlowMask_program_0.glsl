@@ -26,7 +26,7 @@ vec2 SV_Target0;
 vec2 u_xlat0;
 mediump float u_xlat16_0;
 vec4 u_xlat1;
-mediump vec2 u_xlat16_1;
+mediump vec4 u_xlat16_1;
 bool u_xlatb1;
 vec4 u_xlat2;
 vec2 u_xlat3;
@@ -48,7 +48,7 @@ void main()
     u_xlat1 = u_xlat1 + vs_TEXCOORD0.xyxy;
     u_xlat16_3 = texture2D(_MainTex, u_xlat1.zw).x;
     u_xlat16_6 = texture2D(_MainTex, u_xlat1.xy).x;
-    u_xlat16_1.xy = texture2D(_MainTex, vs_TEXCOORD0.xy).xy;
+    u_xlat16_1 = texture2D(_MainTex, vs_TEXCOORD0.xy);
     u_xlat6 = max(u_xlat16_6, u_xlat16_1.x);
     u_xlat2.xyz = (-_DilateTexelSize.xyx);
     u_xlat2.w = 0.0;
@@ -78,7 +78,10 @@ void main()
     u_xlat0.y = (u_xlatb1) ? u_xlat6 : u_xlat9;
     u_xlat0.y = clamp(u_xlat0.y, 0.0, 1.0);
     SV_Target0.xy = u_xlat0.xy;
-    gl_FragColor = vec4(SV_Target0,0.,1.);
+    // Carry the first ring's edge in B. It is identical to EdgeMask, and
+    // subsequent rings preserve it instead of requiring a separate edge pass.
+    float edge = (_GlowFirstPass > 0.5) ? clamp(u_xlat0.x - u_xlat16_9, 0.0, 1.0) : u_xlat16_1.b;
+    gl_FragColor = vec4(SV_Target0,edge,1.);
     return;
 }
 

@@ -1490,6 +1490,7 @@ struct ReplicaList {
     noise_precise_btn: DRectButton,
     noise_distortion_btn: DRectButton,
     noise_music_btn: DRectButton,
+    noise_low_btn: DRectButton,
 }
 impl ReplicaList {
     fn new() -> Self {
@@ -1515,6 +1516,7 @@ impl ReplicaList {
             noise_precise_btn: DRectButton::new(),
             noise_distortion_btn: DRectButton::new(),
             noise_music_btn: DRectButton::new(),
+            noise_low_btn: DRectButton::new(),
         }
     }
     fn top_touch(&mut self, touch: &Touch, t: f32) -> bool {
@@ -1546,6 +1548,7 @@ impl ReplicaList {
             self.noise_precise_btn = DRectButton::new();
             self.noise_distortion_btn = DRectButton::new();
             self.noise_music_btn = DRectButton::new();
+            self.noise_low_btn = DRectButton::new();
             return Ok(Some(false));
         }
         if self.noise_open {
@@ -1555,6 +1558,7 @@ impl ReplicaList {
                 self.noise_precise_btn = DRectButton::new();
                 self.noise_distortion_btn = DRectButton::new();
                 self.noise_music_btn = DRectButton::new();
+                self.noise_low_btn = DRectButton::new();
                 return Ok(Some(true));
             }
             if cfg.enabled && self.noise_precise_btn.touch(touch, t) {
@@ -1563,6 +1567,10 @@ impl ReplicaList {
             }
             if cfg.enabled && self.noise_distortion_btn.touch(touch, t) {
                 cfg.remove_distortion ^= true;
+                return Ok(Some(true));
+            }
+            if cfg.enabled && self.noise_low_btn.touch(touch, t) {
+                cfg.low_performance ^= true;
                 return Ok(Some(true));
             }
             if cfg.enabled && self.noise_music_btn.touch(touch, t) {
@@ -1676,8 +1684,9 @@ impl ReplicaList {
                                 cfg.remove_distortion,
                             );
                             render_replica_switch_row(ui, nested_w, t, "音乐不受影响", None, &mut self.noise_music_btn, cfg.music_unaffected);
+                            render_replica_switch_row(ui, nested_w, t, "低性能模式", None, &mut self.noise_low_btn, cfg.low_performance);
                             ui.dx(-0.035);
-                            (w, ITEM_HEIGHT * 4.)
+                            (w, ITEM_HEIGHT * 5.)
                         } else {
                             (w, ITEM_HEIGHT)
                         }

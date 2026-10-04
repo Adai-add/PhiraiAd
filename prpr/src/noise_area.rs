@@ -12,6 +12,7 @@ pub struct NoiseAreaConfig {
     pub precise_edges: bool,
     pub remove_distortion: bool,
     pub music_unaffected: bool,
+    pub low_performance: bool,
 }
 
 impl Default for NoiseAreaConfig {
@@ -21,6 +22,7 @@ impl Default for NoiseAreaConfig {
             precise_edges: false,
             remove_distortion: false,
             music_unaffected: false,
+            low_performance: false,
         }
     }
 }
@@ -80,6 +82,7 @@ pub struct BlockScaleEvent {
 }
 
 pub mod audio;
+mod perf;
 pub mod render;
 
 fn ease_raw(n: i32, t: f32) -> f32 {
@@ -479,12 +482,15 @@ mod tests {
         let cfg: crate::config::Config = serde_json::from_str("{}").unwrap();
         assert!(cfg.noise_area.enabled);
         assert!(!cfg.noise_area.precise_edges);
+        assert!(!cfg.noise_area.low_performance);
         let mut n = cfg.noise_area;
         n.music_unaffected = true;
+        n.low_performance = true;
         assert!(!n.remove_distortion);
         assert!(!n.precise_edges);
         let json = serde_json::to_string(&n).unwrap();
         let back: NoiseAreaConfig = serde_json::from_str(&json).unwrap();
         assert!(back.music_unaffected);
+        assert!(back.low_performance);
     }
 }

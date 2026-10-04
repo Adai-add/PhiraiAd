@@ -157,16 +157,17 @@ void main()
     u_xlat0.x = -abs(u_xlat0.x) + vs_TEXCOORD6;
     u_xlatb0.x = u_xlat0.x<0.0;
     if(u_xlatb0.x){discard;}
-    u_xlat16_0 = texture2D(_MaskRT, vs_TEXCOORD0.xy).r;
+    mediump vec4 maskChannels = texture2D(_MaskRT, vs_TEXCOORD0.xy);
+    u_xlat16_0 = maskChannels.r;
     u_xlat16.xy = vs_TEXCOORD0.xy * _EffectRT_TexelSize.zw;
     u_xlat16.xy = floor(u_xlat16.xy);
     u_xlat16.xy = u_xlat16.xy + vec2(0.5, 0.5);
     u_xlat16.xy = u_xlat16.xy * _EffectRT_TexelSize.xy;
     u_xlat16_16 = texture2D(_EffectRT, u_xlat16.xy).x;
     u_xlat16_32 = texture2D(_EffectRT, vs_TEXCOORD0.xy).y;
-    u_xlat16_48 = texture2D(_MaskRT, vs_TEXCOORD0.xy).b;
-    u_xlat16_1.x = texture2D(_MaskRT, vs_TEXCOORD0.xy).a;
-    u_xlat16_17 = texture2D(_MaskRT, vs_TEXCOORD0.xy).g;
+    u_xlat16_48 = maskChannels.b;
+    u_xlat16_1.x = maskChannels.a;
+    u_xlat16_17 = maskChannels.g;
     u_xlat16_2.x = (-u_xlat16_48) + u_xlat16_1.x;
     u_xlat16_18 = u_xlat16_17 * abs(u_xlat16_2.x);
     u_xlat48 = texture2D(_EffectRT, (floor(vs_TEXCOORD0.xy * _HoverSize) + 0.5) / _HoverSize).b;
