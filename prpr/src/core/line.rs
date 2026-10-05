@@ -315,6 +315,11 @@ impl JudgeLine {
                         });
                     }
                     JudgeLineKind::Paint(anim, state) => {
+                        // Native noise capture reuses the painted image; do not
+                        // accumulate another brush stroke in the same frame.
+                        if res.noise_capture {
+                            return;
+                        }
                         let mut color = color.unwrap_or(WHITE);
                         color.a = alpha.max(0.0) * 2.55;
                         let mut gl = unsafe { get_internal_gl() };
@@ -408,7 +413,7 @@ impl JudgeLine {
             let replay_targets: Vec<_> = res
                 .replay_note_targets
                 .iter()
-                .filter_map(|&(line, note)| (line == id as u32).then_some(note))
+                .filter_map(|&(line, note)| (!res.noise_capture && line == id as u32).then_some(note))
                 .collect();
             for note_id in replay_targets {
                 if let Some(note) = self.notes.get(note_id as usize) {

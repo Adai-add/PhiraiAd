@@ -365,6 +365,11 @@ impl ParticleEmitter {
         self.emitter_square.draw(vec2(0., 0.), dt);
     }
 
+    pub fn draw_snapshot(&mut self) {
+        self.emitter.draw_snapshot();
+        self.emitter_square.draw_snapshot();
+    }
+
     pub fn set_scale(&mut self, scale: f32) {
         self.emitter.config.size = self.scale * scale / 5.;
         self.emitter_square.config.size = self.scale * scale / 44.;
@@ -408,6 +413,8 @@ pub struct Resource {
     pub replay_capture: bool,
     pub replay_view: bool,
     pub chart_post_view: bool,
+    /// Render-only native noise source; never updates input or replay metadata.
+    pub noise_capture: bool,
     pub replay_note_targets: HashSet<(u32, u32)>,
     pub replay_note_centers: HashMap<(u32, u32), [f32; 2]>,
     pub replay_fx: Vec<crate::replay::Fx>,
@@ -551,6 +558,7 @@ impl Resource {
             replay_capture: false,
             replay_view: false,
             chart_post_view: false,
+            noise_capture: false,
             replay_note_centers: HashMap::new(),
             replay_note_targets: HashSet::new(),
             replay_fx: Vec::new(),
@@ -689,6 +697,23 @@ impl Resource {
 
     /// Visibility tests use the same camera view as the rendered chart.
     pub fn chart_view_point(&self, pt: Point, inverse: bool) -> Point {
+        if self.noise_capture {
+            // Native canvas camera includes only the expanded canvas framing,
+            // not the user's practice zoom. Culling must retain its whole area.
+            let cx = if self.config.flip_x() {
+                -self.camera.target.x
+            } else {
+                self.camera.target.x
+            };
+            let cy = self.camera.target.y;
+            let sx = self.camera.zoom.x;
+            let sy = -self.camera.zoom.y / self.aspect_ratio;
+            return if inverse {
+                Point::new(pt.x / sx + cx, pt.y / sy - cy)
+            } else {
+                Point::new((pt.x - cx) * sx, (pt.y + cy) * sy)
+            };
+        }
         if self.chart_post_view {
             return pt;
         }

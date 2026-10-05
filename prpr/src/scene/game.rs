@@ -2263,7 +2263,10 @@ impl Scene for GameScene {
                 self.res.replay_note_targets.extend(recorder.pending.iter().map(|e| (e.line, e.note)));
             }
         }
+        let native_noise_overlay =
+            crate::noise_area::render::use_native_overlay(self.mode == GameMode::Exercise, self.res.practice_view.scale_percent);
         self.res.chart_post_view = self.res.has_noise_area
+            && !native_noise_overlay
             && (self.mode == GameMode::Exercise || self.res.replay_view)
             && self.res.practice_view != Default::default()
             && !self
@@ -2354,7 +2357,25 @@ impl Scene for GameScene {
             self.gl.quad_gl.viewport(chart_target_vp);
         }
         if let Some(renderer) = &mut self.noise_renderer {
-            renderer.render(res, &self.chart.extra.block_areas, &self.judge.noise_state, ui.viewport, noise_projection)?;
+            let chart = &self.chart;
+            let bad_notes = &self.bad_notes;
+            renderer.render(res, &chart.extra.block_areas, &self.judge.noise_state, ui.viewport, noise_projection, native_noise_overlay, |res| {
+                draw_background(*res.background);
+                let h = 1. / res.aspect_ratio;
+                draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
+                chart.render(ui, res, judgement_ranges.as_ref().map(|profile| (profile, self.judge.notes.as_slice())));
+                // Chart post-effects may swap its source target.
+                set_camera(&Camera2D {
+                    render_target: Some(res.chart_target.as_ref().unwrap().output()),
+                    ..res.camera
+                });
+                for note in bad_notes {
+                    note.render(res);
+                }
+                if res.config.particle {
+                    res.emitter.draw_snapshot();
+                }
+            })?;
         }
         if res.chart_post_view {
             // Compose at the original chart camera first. Transform the completed

@@ -179,7 +179,20 @@ impl Effect {
 
         gl_use_material(self.material);
         let top = 1. / if self.global { screen_aspect() } else { res.aspect_ratio };
-        draw_rectangle(-1., -top, 2., top * 2., WHITE);
+        if res.noise_capture {
+            // A native capture can extend beyond the original window. Cover
+            // its full target rather than leaving old pixels outside [-1,1].
+            let camera = &res.camera;
+            draw_rectangle(
+                camera.target.x - 1. / camera.zoom.x,
+                camera.target.y + 1. / camera.zoom.y,
+                2. / camera.zoom.x,
+                -2. / camera.zoom.y,
+                WHITE,
+            );
+        } else {
+            draw_rectangle(-1., -top, 2., top * 2., WHITE);
+        }
         gl_use_default_material();
     }
 }

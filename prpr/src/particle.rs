@@ -799,6 +799,17 @@ impl Emitter {
         }
     }
 
+    /// Draw the already-uploaded particle state without another simulation step.
+    /// Even update(dt=0) applies angular damping and can emit burst particles.
+    pub fn draw_snapshot(&mut self) {
+        let mut gl = unsafe { get_internal_gl() };
+        gl.flush();
+        let InternalGlContext { quad_context: ctx, quad_gl } = gl;
+        self.setup_render_pass(quad_gl, ctx);
+        self.perform_render_pass(quad_gl, ctx);
+        self.end_render_pass(quad_gl, ctx);
+    }
+
     pub fn draw(&mut self, pos: Vec2, dt: f32) {
         let mut gl = unsafe { get_internal_gl() };
 

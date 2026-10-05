@@ -62,36 +62,105 @@ impl NoiseCanvas {
         self.atlas(self.anchor + (uv - self.anchor) / self.scale + self.shift)
     }
     fn dimensions(self) -> (u32, u32) {
-        // Use f64 for the budget: typed zoom values can expand the canvas far
-        // beyond the f32 pixel-area range without requiring a huge texture.
-        let x = self.native.x as f64 * self.span.x as f64;
-        let y = self.native.y as f64 * self.span.y as f64;
-        let factor = (4096. / x.max(y)).min((4_194_304. / (x * y)).sqrt()).min(1.);
-        ((x * factor).floor().max(1.) as u32, (y * factor).floor().max(1.) as u32)
+        ((self.native.x * self.span.x).round().max(1.) as u32, (self.native.y * self.span.y).round().max(1.) as u32)
     }
     fn projection(self, base: Mat4, vp: (i32, i32, i32, i32)) -> Mat4 {
         let ratio = vec2(vp.2 as f32, vp.3 as f32) / self.native / self.span;
         let offset = (self.anchor - self.origin) / self.span * 2. - Vec2::ONE;
         Mat4::from_translation(vec3(offset.x, offset.y, 0.)) * Mat4::from_scale(vec3(ratio.x, ratio.y, 1.)) * base
     }
+    fn camera(self, native_zoom: Vec2, vp: (i32, i32, i32, i32), dimensions: (u32, u32)) -> Camera2D {
+        let ratio = vec2(vp.2 as f32, vp.3 as f32) / self.native / self.span;
+        let offset = (self.anchor - self.origin) / self.span * 2. - Vec2::ONE;
+        let zoom = native_zoom * ratio;
+        Camera2D {
+            zoom,
+            target: -offset / zoom,
+            viewport: Some((0, 0, dimensions.0 as i32, dimensions.1 as i32)),
+            ..Default::default()
+        }
+    }
     fn uniform(self) -> Vec4 {
         vec4(self.span.x, self.span.y, self.origin.x, self.origin.y)
     }
 }
-const VIEW_DELTA: &str = r#"#version 100
-precision highp float;
-varying vec2 uv;
-uniform sampler2D Original; uniform sampler2D Rendered; uniform sampler2D Reference;
-uniform vec4 AtlasMap;
-void main(){vec2 p=uv*AtlasMap.xy+AtlasMap.zw;vec4 original=texture2D(Original,uv);
-vec4 rendered=texture2D(Rendered,p);vec4 reference=texture2D(Reference,p);
-gl_FragColor=vec4(original.rgb+rendered.rgb-reference.rgb,original.a);}"#;
+pub(crate) fn use_native_overlay(exercise: bool, scale_percent: f32) -> bool {
+    exercise && scale_percent != 100.
+}
+const VIEW_OVERLAY: &str = r#"#version 100
+precision highp float; varying vec2 uv;
+uniform sampler2D Overlay; uniform vec4 AtlasMap; uniform vec4 TileCore;
+void main(){vec2 p=uv*AtlasMap.xy+AtlasMap.zw;
+if(p.x<TileCore.x||p.y<TileCore.y||p.x>=TileCore.z||p.y>=TileCore.w){discard;}
+gl_FragColor=texture2D(Overlay,p);}"#;
+
+#[derive(Clone, Copy, Debug)]
+struct NoiseTile {
+    canvas: NoiseCanvas,
+    core: Vec4,
+}
+fn noise_tiles(canvas: NoiseCanvas, occupied: &[Coverage]) -> Vec<NoiseTile> {
+    let a = canvas.anchor - canvas.anchor / canvas.scale + canvas.shift;
+    let b = canvas.anchor + (Vec2::ONE - canvas.anchor) / canvas.scale + canvas.shift;
+    let lo = a.min(b);
+    let hi = a.max(b);
+    let mut indices = HashSet::new();
+    for bounds in occupied {
+        let min = bounds.min.max(lo);
+        let max = bounds.max.min(hi);
+        if min.x >= max.x || min.y >= max.y {
+            continue;
+        }
+        for y in (min.y * 2.).floor() as i32..(max.y * 2.).ceil() as i32 {
+            for x in (min.x * 2.).floor() as i32..(max.x * 2.).ceil() as i32 {
+                indices.insert((x, y));
+            }
+        }
+    }
+    let mut indices: Vec<_> = indices.into_iter().collect();
+    indices.sort_unstable_by_key(|&(x, y)| (y, x));
+    indices
+        .into_iter()
+        .map(|(x, y)| {
+            let min = vec2(x as f32, y as f32) * 0.5;
+            let origin = ((min - Vec2::splat(0.25)) * canvas.native).floor() / canvas.native;
+            let begin = min - origin;
+            NoiseTile {
+                canvas: NoiseCanvas {
+                    origin,
+                    span: Vec2::ONE,
+                    ..canvas
+                },
+                core: vec4(begin.x, begin.y, begin.x + 0.5, begin.y + 0.5),
+            }
+        })
+        .collect()
+}
+
+/// Each intermediate texture keeps its original 100% pixel lattice. Different
+/// channels have different lattice spacing; align their origins separately.
+fn lattice_domain(origin: Vec2, size: (u32, u32)) -> Vec4 {
+    let cells = vec2(size.0 as f32, size.1 as f32);
+    let snapped = (origin * cells).floor() / cells;
+    vec4(1., 1., snapped.x, snapped.y)
+}
+struct NoiseDomains(Vec<(Texture2D, Vec4)>);
+impl NoiseDomains {
+    fn get(&self, texture: Texture2D) -> Vec4 {
+        self.0.iter().find(|(t, _)| *t == texture).map_or(vec4(1., 1., 0., 0.), |(_, d)| *d)
+    }
+    fn point(&self, from: Vec4, texture: Texture2D, p: Vec2) -> Vec2 {
+        let d = self.get(texture);
+        (p * vec2(from.x, from.y) + vec2(from.z, from.w) - vec2(d.z, d.w)) / vec2(d.x, d.y)
+    }
+}
 
 /// Evaluate procedural effects in canonical UVs; only intermediate framebuffer
 /// samples convert back into atlas UVs. Sprite textures remain local UVs.
 fn canvas_shader(vert: &str, frag: &str) -> (String, String) {
     let mut frag = frag.to_owned();
     let mut changed = false;
+    let mut declarations = String::new();
     for name in [
         "_MaskRT",
         "_EffectRT",
@@ -110,17 +179,26 @@ fn canvas_shader(vert: &str, frag: &str) -> (String, String) {
         "Glow",
         "Hover",
     ] {
+        // A call can contain nested expressions; insert the domain as the first
+        // argument rather than trying to locate its closing parenthesis.
         let from = format!("texture2D({name},");
         if frag.contains(&from) {
-            frag = frag.replace(&from, &format!("noiseSample({name},"));
+            frag = frag.replace(&from, &format!("noiseSample({name}, NoiseInput{name},"));
+            declarations.push_str(&format!("uniform vec4 NoiseInput{name};\n"));
             changed = true;
         }
     }
     if !changed {
         return (vert.to_owned(), frag);
     }
-    let helper = "uniform vec4 NoiseDomain;\nvec4 noiseSample(sampler2D tex,vec2 p){return texture2D(tex,(p-NoiseDomain.zw)/NoiseDomain.xy); }\n";
-    frag = frag.replacen("void main()", &format!("{helper}void main()"), 1);
+    let helper = "uniform vec4 NoiseDomain;\nvec4 noiseSample(sampler2D tex,vec4 domain,vec2 p){return texture2D(tex,(p-domain.zw)/domain.xy); }\n";
+    frag = frag.replacen("void main()", &format!("{declarations}{helper}void main()"), 1);
+    // Retain the original window test for normal rendering only. Tile output
+    // must not clip canonical UVs to the original window.
+    if frag.contains("if(u_xlatb0.x){discard;}") && frag.contains("_MaskRT") {
+        frag = frag.replace("if(u_xlatb0.x){discard;}", "if(u_xlatb0.x && NoiseExpanded<0.5){discard;}");
+        frag = frag.replacen("void main()", "uniform float NoiseExpanded;\nvoid main()", 1);
+    }
     let (header, body) = vert.split_once("void main()").unwrap();
     let re = regex::Regex::new(r"\btexcoord\b").unwrap();
     let mut body = re.replace_all(body, "(texcoord * NoiseDomain.xy + NoiseDomain.zw)").into_owned();
@@ -313,6 +391,9 @@ impl Program {
             textures,
         };
         program.v4("NoiseDomain", vec4(1., 1., 0., 0.));
+        for name in program.uniforms.keys().filter(|name| name.starts_with("NoiseInput")) {
+            program.v4(name, vec4(1., 1., 0., 0.));
+        }
         Ok(program)
     }
     fn f(&self, n: &str, v: f32) {
@@ -426,18 +507,29 @@ impl Drop for Targets {
 /// Settings are selected before loading a chart, so its effect pipeline is optional.
 struct ViewTargets {
     work: Option<crate::core::MSRenderTarget>,
-    reference: RenderTarget,
+    overlay: RenderTarget,
+    simple_overlay: Program,
     composite: Program,
     dimensions: (u32, u32),
 }
 impl ViewTargets {
     fn new(dimensions: (u32, u32)) -> Result<Self> {
-        let composite = Program::new(VERT, VIEW_DELTA, None)?;
-        let reference = render_target(dimensions.0, dimensions.1);
-        reference.texture.set_filter(FilterMode::Linear);
+        let composite = Program::new(
+            VERT,
+            VIEW_OVERLAY,
+            Some(BlendState::new(Equation::Add, BlendFactor::One, BlendFactor::OneMinusValue(BlendValue::SourceAlpha))),
+        )?;
+        let simple_overlay = Program::new(
+            VERT,
+            "#version 100\nprecision mediump float; varying vec4 col; void main(){gl_FragColor=vec4(col.rgb*col.a,col.a);}",
+            Some(BlendState::new(Equation::Add, BlendFactor::One, BlendFactor::OneMinusValue(BlendValue::SourceAlpha))),
+        )?;
+        let overlay = render_target(dimensions.0, dimensions.1);
+        overlay.texture.set_filter(FilterMode::Linear);
         Ok(Self {
             work: Some(crate::core::MSRenderTarget::new(dimensions, 1)),
-            reference,
+            overlay,
+            simple_overlay,
             composite,
             dimensions,
         })
@@ -447,12 +539,13 @@ impl Drop for ViewTargets {
     fn drop(&mut self) {
         let mut gl = unsafe { get_internal_gl() };
         gl.flush();
-        self.reference.render_pass.delete(gl.quad_context);
+        self.overlay.render_pass.delete(gl.quad_context);
     }
 }
 pub struct NoiseRenderer {
     effects: Option<EffectRenderer>,
     view_targets: Option<ViewTargets>,
+    overlay_output: Option<RenderTarget>,
     basic_profiler: Option<Profiler>,
     view_profiler: Option<Profiler>,
 }
@@ -461,6 +554,7 @@ impl NoiseRenderer {
         Ok(Self {
             effects: if low { None } else { Some(EffectRenderer::new().await?) },
             view_targets: None,
+            overlay_output: None,
             basic_profiler: if low { Some(Profiler::new()) } else { None },
             view_profiler: None,
         })
@@ -482,13 +576,13 @@ impl NoiseRenderer {
         state: &NoiseAreaState,
         full_vp: (i32, i32, i32, i32),
         projection: Mat4,
+        native_overlay: bool,
+        mut capture_chart: impl FnMut(&mut Resource),
     ) -> Result<()> {
         if !res.config.noise_area.enabled {
             return Ok(());
         }
-        // Existing post-view composition already generates native noise first.
-        // The expanded-frustum path needs a dedicated native noise canvas.
-        if res.chart_post_view || res.practice_view == Default::default() {
+        if !native_overlay {
             if let Some(effects) = &mut self.effects {
                 effects.canvas = None;
             }
@@ -501,16 +595,43 @@ impl NoiseRenderer {
             return Ok(());
         };
         let source = original_target.output().texture;
+        let original_camera = res.camera;
+        let original_last_vp = res.last_vp;
+        let original_view = res.practice_view;
+        let original_samples = res.config.sample_count;
         let native = vec2(source.width(), source.height());
-        let original_vp = res.camera.viewport;
-        let cv = original_vp.unwrap_or(full_vp);
+        let cv = original_camera.viewport.unwrap_or(full_vp);
         let local_vp = (cv.0 - full_vp.0, cv.1 - full_vp.1, cv.2, cv.3);
-        let canvas = NoiseCanvas::new(res.practice_view, local_vp, native);
-        let dimensions = canvas.dimensions();
-        // Allocation may fail while compiling the tiny composition shader.
-        if self.view_targets.as_ref().is_none_or(|targets| targets.dimensions != dimensions) {
+        let full_canvas = NoiseCanvas::new(original_view, local_vp, native);
+        let base = Mat4::from_scale(vec3(original_camera.zoom.x, original_camera.zoom.y, 1.));
+        let mut occupied = Vec::new();
+        for area in areas.iter().filter(|a| a.visible(res.time as f32)) {
+            let mut bounds = Coverage::new();
+            for p in area.pose(res.time as f32, res.aspect_ratio).corners() {
+                bounds.add(block_screen_uv(p, res.aspect_ratio, res.config.flip_x(), base, local_vp, native));
+            }
+            bounds.min -= Vec2::splat(0.18);
+            bounds.max += Vec2::splat(0.18);
+            occupied.push(bounds);
+        }
+        for hover in state.hovers.iter().filter(|h| h.scale > 0.) {
+            let mut bounds = Coverage::new();
+            for p in [vec2(-0.22, -0.22), vec2(0.22, 0.22)] {
+                bounds.add(block_screen_uv(hover.position + p * hover.scale, res.aspect_ratio, res.config.flip_x(), base, local_vp, native));
+            }
+            bounds.min -= Vec2::splat(0.18);
+            bounds.max += Vec2::splat(0.18);
+            occupied.push(bounds);
+        }
+        let tiles = noise_tiles(full_canvas, &occupied);
+        if tiles.is_empty() {
+            res.chart_target = Some(original_target);
+            return Ok(());
+        }
+        let dimensions = (native.x as u32, native.y as u32);
+        if self.view_targets.as_ref().is_none_or(|t| t.dimensions != dimensions) {
             match ViewTargets::new(dimensions) {
-                Ok(targets) => self.view_targets = Some(targets),
+                Ok(t) => self.view_targets = Some(t),
                 Err(err) => {
                     res.chart_target = Some(original_target);
                     return Err(err);
@@ -519,46 +640,73 @@ impl NoiseRenderer {
         }
         let saved_viewport = unsafe { get_internal_gl() }.quad_gl.get_viewport();
         push_camera_state();
-        let reference = self.view_targets.as_ref().unwrap().reference;
-        EffectRenderer::camera(reference);
-        unsafe { get_internal_gl() }.quad_gl.scissor(None);
+        // Copy the ordinary chart once. Non-overlapping tile cores are then
+        // blended into this target; no screen-texture resampling feeds effects.
+        original_target.swap();
+        EffectRenderer::camera(original_target.output());
         gl_use_default_material();
-        clear_background(BLANK);
-        let corners = [Vec2::ZERO, vec2(1., 0.), Vec2::ONE, vec2(0., 1.)];
-        EffectRenderer::mesh_uv(corners, corners.map(|uv| canvas.screen(canvas.origin + uv * canvas.span)), source);
+        unsafe { get_internal_gl() }.quad_gl.scissor(None);
+        clear_background(BLACK);
+        EffectRenderer::mesh([Vec2::ZERO, vec2(1., 0.), Vec2::ONE, vec2(0., 1.)], WHITE, Some(source));
         unsafe { get_internal_gl() }.flush();
-        res.chart_target = self.view_targets.as_mut().unwrap().work.take();
-        EffectRenderer::camera(res.chart_target.as_ref().unwrap().output());
-        clear_background(BLANK);
-        EffectRenderer::mesh_uv(corners, corners, reference.texture);
-        unsafe { get_internal_gl() }.flush();
-        res.camera.viewport = Some((0, 0, dimensions.0 as i32, dimensions.1 as i32));
-        if let Some(effects) = &mut self.effects {
-            effects.canvas = Some(canvas);
-        }
-        let base = Mat4::from_scale(vec3(res.camera.zoom.x, res.camera.zoom.y, 1.));
-        let result = self.render_native(res, areas, state, (0, 0, dimensions.0 as i32, dimensions.1 as i32), canvas.projection(base, local_vp));
-        let rendered = res.chart_target.as_ref().unwrap().output().texture;
-        self.view_targets.as_mut().unwrap().work = res.chart_target.take();
-        res.camera.viewport = original_vp;
-        if let Some(effects) = &mut self.effects {
-            effects.canvas = None;
-        }
-        if result.is_ok() {
-            original_target.swap();
+        let mut result = Ok(());
+        for tile in tiles {
+            let canvas = tile.canvas;
+            res.chart_target = self.view_targets.as_mut().unwrap().work.take();
+            res.camera = canvas.camera(original_camera.zoom, local_vp, dimensions);
+            res.camera.render_target = Some(res.chart_target.as_ref().unwrap().output());
+            res.last_vp = (0, 0, dimensions.0 as i32, dimensions.1 as i32);
+            res.practice_view = Default::default();
+            res.config.sample_count = 1;
+            res.noise_capture = true;
+            set_camera(&res.camera);
+            gl_use_default_material();
+            unsafe { get_internal_gl() }.quad_gl.scissor(None);
+            clear_background(BLACK);
+            if !res.config.noise_area.low_performance {
+                capture_chart(res);
+            }
+            unsafe { get_internal_gl() }.flush();
+            res.noise_capture = false;
+            let overlay = self.view_targets.as_ref().unwrap().overlay;
+            EffectRenderer::camera(overlay);
+            clear_background(BLANK);
+            self.overlay_output = Some(overlay);
+            if let Some(effects) = &mut self.effects {
+                effects.canvas = Some(canvas);
+                effects.overlay_output = Some(overlay);
+            }
+            result = self.render_native(res, areas, state, (0, 0, dimensions.0 as i32, dimensions.1 as i32), canvas.projection(base, local_vp));
+            self.overlay_output = None;
+            self.view_targets.as_mut().unwrap().work = res.chart_target.take();
+            if let Some(effects) = &mut self.effects {
+                effects.canvas = None;
+                effects.overlay_output = None;
+            }
+            if result.is_err() {
+                break;
+            }
             EffectRenderer::camera(original_target.output());
             let program = &self.view_targets.as_ref().unwrap().composite;
             let a = canvas.screen_to_atlas(Vec2::ZERO);
             let b = canvas.screen_to_atlas(Vec2::ONE);
             program.v4("AtlasMap", vec4(b.x - a.x, b.y - a.y, a.x, a.y));
-            program.material.set_texture("Original", source);
-            program.material.set_texture("Rendered", rendered);
-            program.material.set_texture("Reference", reference.texture);
+            program.v4("TileCore", tile.core);
+            program.material.set_texture("Overlay", overlay.texture);
             gl_use_material(program.material);
             EffectRenderer::quad();
             gl_use_default_material();
             unsafe { get_internal_gl() }.flush();
         }
+        if result.is_err() {
+            original_target.swap();
+        }
+        res.camera = original_camera;
+        res.last_vp = original_last_vp;
+        res.practice_view = original_view;
+        res.config.sample_count = original_samples;
+        res.noise_capture = false;
+
         res.chart_target = Some(original_target);
         pop_camera_state();
         let gl = unsafe { get_internal_gl() };
@@ -589,7 +737,7 @@ impl NoiseRenderer {
         let Some(target) = res.chart_target.as_ref() else {
             return Ok(());
         };
-        let output = target.output();
+        let output = self.overlay_output.unwrap_or_else(|| target.output());
         let (w, h) = (output.texture.width(), output.texture.height());
         let cv = res.camera.viewport.unwrap_or(full_vp);
         let vp = (cv.0 - full_vp.0, cv.1 - full_vp.1, cv.2, cv.3);
@@ -679,7 +827,11 @@ impl NoiseRenderer {
         push_camera_state();
         EffectRenderer::camera(output);
         unsafe { get_internal_gl() }.quad_gl.scissor(None);
-        gl_use_default_material();
+        if self.overlay_output.is_some() {
+            gl_use_material(self.view_targets.as_ref().unwrap().simple_overlay.material);
+        } else {
+            gl_use_default_material();
+        }
         let timing = profiler.begin(11);
         for (poly, fade, blocking, boundaries) in pieces {
             let vertices: Vec<_> = poly
@@ -723,6 +875,7 @@ impl NoiseRenderer {
         }
         unsafe { get_internal_gl() }.flush();
         profiler.end(timing);
+        gl_use_default_material();
         pop_camera_state();
         let gl = unsafe { get_internal_gl() };
         gl.quad_gl.render_pass(Some(output.render_pass));
@@ -907,6 +1060,7 @@ fn mask_polygons(normals: &[[Vec2; 4]], subtracts: &[[Vec2; 4]], screen: &[Vec2;
 struct EffectRenderer {
     programs: Vec<Program>,
     canvas: Option<NoiseCanvas>,
+    overlay_output: Option<RenderTarget>,
     sprite: Program,
     hover_sprite: Program,
     mask: Program,
@@ -919,6 +1073,7 @@ struct EffectRenderer {
     cached_geometry: [Vec<ScreenQuad>; 6],
     static_cache_valid: bool,
     cached_hover: bool,
+    cached_domain: Option<Vec4>,
     low_enabled: bool,
     variants: Vec<Program>,
     fused_effect: Program,
@@ -965,6 +1120,7 @@ impl EffectRenderer {
         tracing::info!(stage = "textures_ready", "noise-area initialization");
         let mut renderer = Self {
             canvas: None,
+            overlay_output: None,
             programs: vec![
                 program!("SubtractBlockBlender_program_0"),
                 program!("SubtractBlockBlender_program_1"),
@@ -996,6 +1152,7 @@ impl EffectRenderer {
             cached_geometry: std::array::from_fn(|_| Vec::new()),
             static_cache_valid: false,
             cached_hover: false,
+            cached_domain: None,
             low_enabled: false,
             variants: Vec::new(),
             fused_effect: Program::new(VERT, &PACK_EFFECT.replace("texture2D(Edge,uv).r", "texture2D(Glow,uv).b"), None)?,
@@ -1054,9 +1211,14 @@ impl EffectRenderer {
         profiler: &mut Profiler,
         channel: usize,
         clip: Option<(i32, i32, i32, i32)>,
+        domains: Option<&NoiseDomains>,
     ) -> Result<()> {
         for (name, _) in textures {
             ensure!(program.textures.contains(*name), "Noise-area shader has no texture sampler {name}");
+        }
+        program.v4("NoiseDomain", domains.map_or(vec4(1., 1., 0., 0.), |d| d.get(target.texture)));
+        for (name, texture) in textures {
+            program.v4(&format!("NoiseInput{name}"), domains.map_or(vec4(1., 1., 0., 0.), |d| d.get(*texture)));
         }
         let timing = profiler.begin(channel);
         Self::camera(target);
@@ -1120,7 +1282,7 @@ impl EffectRenderer {
         unsafe { get_internal_gl() }.flush();
         target.swap();
         let source = target.old().texture;
-        let output = target.output();
+        let output = self.overlay_output.unwrap_or_else(|| target.output());
         let (w, h) = (source.width() as u32, source.height() as u32);
         let precise = res.config.noise_area.precise_edges;
         let low = res.config.noise_area.low_performance;
@@ -1135,6 +1297,11 @@ impl EffectRenderer {
         {
             program.v4("NoiseDomain", domain);
         }
+        if self.cached_domain != Some(domain) {
+            self.static_cache_valid = false;
+            self.precise_cache_valid = false;
+        }
+        self.cached_domain = Some(domain);
         let canonical_sizes = target_sizes(native_size.x as u32, native_size.y as u32, precise, low);
         self.profiler.frame(low, precise, w, h);
         if self.targets.as_ref().is_none_or(|t| t.w != w || t.h != h) || self.precise_enabled != precise || self.low_enabled != low {
@@ -1147,6 +1314,19 @@ impl EffectRenderer {
             self.low_enabled = low;
         }
         let rt = &self.targets.as_ref().unwrap().targets;
+        let domains = self.canvas.map(|c| {
+            let mut entries: Vec<_> = rt
+                .iter()
+                .zip(canonical_sizes)
+                .map(|(r, size)| (r.texture, lattice_domain(c.origin, size)))
+                .collect();
+            entries.push((source, c.uniform()));
+            entries.push((output.texture, c.uniform()));
+            NoiseDomains(entries)
+        });
+        for program in self.programs.iter().chain(self.variants.iter()) {
+            program.f("NoiseExpanded", if self.canvas.is_some() { 1. } else { 0. });
+        }
         let t = res.time as f32;
         let cv = res.camera.viewport.unwrap_or(full_vp);
         let vp = (cv.0 - full_vp.0, cv.1 - full_vp.1, cv.2, cv.3);
@@ -1257,6 +1437,7 @@ impl EffectRenderer {
                         let vertices = std::array::from_fn::<_, 6, _>(|i| {
                             let p = local[i];
                             let pos = Self::screen_uv(center + p * hover.scale, res, vp, w as f32, h as f32, projection);
+                            let pos = domains.as_ref().map_or(pos, |d| d.point(domain, rt[i].texture, pos));
                             macroquad::models::Vertex {
                                 position: vec3(pos.x * 2. - 1., pos.y * 2. - 1., 0.),
                                 uv: p / 0.44 + Vec2::splat(0.5),
@@ -1270,7 +1451,8 @@ impl EffectRenderer {
                     }
                 } else {
                     for area in &self.geometry[group] {
-                        Self::mesh(area.points, area.color, None);
+                        let points = area.points.map(|p| domains.as_ref().map_or(p, |d| d.point(domain, rt[i].texture, p)));
+                        Self::mesh(points, area.color, None);
                     }
                 }
                 gl_use_default_material();
@@ -1287,7 +1469,7 @@ impl EffectRenderer {
                 }
                 self.programs[p].f("_ClampThresholdLow", 0.09);
                 self.programs[p].f("_ClampThresholdHigh", 0.12);
-                Self::pass(&self.programs[p], rt[target], &[("_MainTex", tex[input])], true, &mut self.profiler, 2, None)?;
+                Self::pass(&self.programs[p], rt[target], &[("_MainTex", tex[input])], true, &mut self.profiler, 2, None, domains.as_ref())?;
             }
             for (p, target, n, s) in [(2, 8, 0, 6), (3, 9, 2, 7)] {
                 if (p == 2 && !active) || (p == 3 && !ready) || (p == 2 && precise) {
@@ -1305,7 +1487,7 @@ impl EffectRenderer {
                 let pr = &self.programs[p];
                 pr.v4("_BlockTime", vec4(t / 20., t, t * 2., t * 3.));
                 let (bindings, len) = compose_textures(tex[n], tex[s], (p == 2).then_some(self.noise));
-                Self::pass(pr, rt[target], &bindings[..len], true, &mut self.profiler, 3, None)?;
+                Self::pass(pr, rt[target], &bindings[..len], true, &mut self.profiler, 3, None, domains.as_ref())?;
             }
             if precise && active {
                 tex[8] = rt[8].texture;
@@ -1314,7 +1496,7 @@ impl EffectRenderer {
                 let pr = &self.precise[supersampling(w, h).trailing_zeros() as usize];
                 pr.v2("SourceSize", vec2(rt[18].texture.width(), rt[18].texture.height()));
                 pr.v2("TargetSize", native_size);
-                Self::pass(pr, rt[8], &[("Normal", tex[18]), ("Subtract", tex[19])], true, &mut self.profiler, 4, None)?;
+                Self::pass(pr, rt[8], &[("Normal", tex[18]), ("Subtract", tex[19])], true, &mut self.profiler, 4, None, domains.as_ref())?;
             }
             let ew = rt[11].texture.width();
             let eh = rt[11].texture.height();
@@ -1335,7 +1517,16 @@ impl EffectRenderer {
                 if precise {
                     tex[11] = rt[11].texture;
                     self.programs[4].v4("_DilateTexelSize", texel);
-                    Self::pass(&self.programs[4], rt[11], &[("_MainTex", tex[8]), ("_ComposeRT", tex[8])], true, &mut self.profiler, 5, None)?;
+                    Self::pass(
+                        &self.programs[4],
+                        rt[11],
+                        &[("_MainTex", tex[8]), ("_ComposeRT", tex[8])],
+                        true,
+                        &mut self.profiler,
+                        5,
+                        None,
+                        domains.as_ref(),
+                    )?;
                 }
                 let weights = [0.45856798, 0.28286123, 0.15658922, 0.07305908, 0.02494781];
                 for (i, weight) in weights[..if low { 3 } else { 5 }].iter().copied().enumerate() {
@@ -1349,7 +1540,7 @@ impl EffectRenderer {
                     // Bound all five dilation rings plus mask displacement and nearest filtering.
                     let margin = vec2(0.11 + 8. * dilation / ew, 0.11 + 8. * dilation / eh);
                     let clip = active_coverage.clip(rt[out].texture.width() as u32, rt[out].texture.height() as u32, margin);
-                    Self::pass(pr, rt[out], &[("_MainTex", tex[glow]), ("_ComposeRT", tex[8])], true, &mut self.profiler, 6, clip)?;
+                    Self::pass(pr, rt[out], &[("_MainTex", tex[glow]), ("_ComposeRT", tex[8])], true, &mut self.profiler, 6, clip, domains.as_ref())?;
                     glow = out;
                 }
             }
@@ -1363,6 +1554,7 @@ impl EffectRenderer {
                         &mut self.profiler,
                         7,
                         None,
+                        domains.as_ref(),
                     )?;
                 }
                 if !(reuse_precise && !hover_visible && !self.cached_hover) {
@@ -1374,6 +1566,7 @@ impl EffectRenderer {
                         &mut self.profiler,
                         7,
                         None,
+                        domains.as_ref(),
                     )?;
                 }
             }
@@ -1391,6 +1584,7 @@ impl EffectRenderer {
                             &mut self.profiler,
                             3,
                             None,
+                            domains.as_ref(),
                         )?;
                     }
                 }
@@ -1399,7 +1593,9 @@ impl EffectRenderer {
                 let timing = self.profiler.begin(8);
                 Self::camera(rt[17]);
                 clear_background(BLANK);
-                Self::mesh([vec2(0., 0.), vec2(1., 0.), vec2(1., 1.), vec2(0., 1.)], WHITE, Some(source));
+                let corners = [Vec2::ZERO, vec2(1., 0.), Vec2::ONE, vec2(0., 1.)];
+                let uv = corners.map(|p| domains.as_ref().map_or(p, |d| d.point(d.get(rt[17].texture), source, p)));
+                Self::mesh_uv(corners, uv, source);
                 unsafe { get_internal_gl() }.flush();
                 self.profiler.end(timing);
             }
@@ -1407,7 +1603,9 @@ impl EffectRenderer {
             let timing = self.profiler.begin(9);
             Self::camera(output);
             clear_background(BLANK);
-            Self::mesh([vec2(0., 0.), vec2(1., 0.), vec2(1., 1.), vec2(0., 1.)], WHITE, Some(source));
+            if self.overlay_output.is_none() {
+                Self::mesh([vec2(0., 0.), vec2(1., 0.), vec2(1., 1.), vec2(0., 1.)], WHITE, Some(source));
+            }
             unsafe { get_internal_gl() }.flush();
             self.profiler.end(timing);
             if disabled {
@@ -1421,6 +1619,7 @@ impl EffectRenderer {
                     &mut self.profiler,
                     10,
                     disabled_clip,
+                    domains.as_ref(),
                 )?;
             }
             if active || ready || hover_visible {
@@ -1475,6 +1674,7 @@ impl EffectRenderer {
                     &mut self.profiler,
                     11,
                     active_clip,
+                    domains.as_ref(),
                 )?;
             }
             Ok(())
@@ -1512,6 +1712,80 @@ impl Drop for EffectRenderer {
 mod tests {
     use super::*;
     #[test]
+    fn tiles_preserve_native_pixels_and_cover_once_with_padding() {
+        let native = vec2(2048., 1158.);
+        for scale in [5., 20., 50., 200., -20.] {
+            let canvas = NoiseCanvas::new(
+                crate::practice_view::PracticeView {
+                    scale_percent: scale,
+                    center_x: 31.,
+                    center_y: -70.,
+                },
+                (0, 0, 2048, 1158),
+                native,
+            );
+            let tiles = noise_tiles(
+                canvas,
+                &[Coverage {
+                    min: vec2(-2., -2.),
+                    max: vec2(3., 3.),
+                }],
+            );
+            for tile in &tiles {
+                assert_eq!(tile.canvas.dimensions(), (2048, 1158));
+                let pixel_origin = tile.canvas.origin * native;
+                assert!((pixel_origin - pixel_origin.round()).length() < 0.001);
+                assert!(tile.core.x >= 0.249 && tile.core.y >= 0.249 && tile.core.z <= 0.752 && tile.core.w <= 0.752);
+            }
+            for screen in [vec2(0.37, 0.42), vec2(0.51, 0.64), vec2(0.1, 0.8)] {
+                let canonical = canvas.anchor + (screen - canvas.anchor) / canvas.scale + canvas.shift;
+                if canonical.x >= -2. && canonical.x < 3. && canonical.y >= -2. && canonical.y < 3. {
+                    let count = tiles
+                        .iter()
+                        .filter(|tile| {
+                            let p = tile.canvas.atlas(canonical);
+                            p.x >= tile.core.x && p.x < tile.core.z && p.y >= tile.core.y && p.y < tile.core.w
+                        })
+                        .count();
+                    assert_eq!(count, 1);
+                }
+            }
+        }
+    }
+    #[test]
+    fn intermediate_channels_use_the_original_pixel_lattice() {
+        for size in [(256, 144), (2048, 1158), (193, 341), (135, 240)] {
+            for origin in [vec2(-0.25, 0.25), vec2(0.7501, -1.25), vec2(-2.3, 3.7)] {
+                let d = lattice_domain(origin, size);
+                let cells = vec2(size.0 as f32, size.1 as f32);
+                let index = vec2(d.z, d.w) * cells;
+                assert!((index - index.round()).length() < 0.001);
+                let pixel_center = vec2(d.z, d.w) + vec2(0.5, 0.5) / cells;
+                let global_index = pixel_center * cells;
+                assert!(((global_index - global_index.floor()) - vec2(0.5, 0.5)).abs().max_element() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn native_overlay_only_runs_for_scaled_practice() {
+        for scale in [5., 50., 99.999, 100., 200., -100.] {
+            assert!(!use_native_overlay(false, scale));
+            assert_eq!(use_native_overlay(true, scale), scale != 100.);
+        }
+    }
+    #[test]
+    fn transparent_overlay_preserves_background_and_additive_glow() {
+        let base = vec3(0.2, 0.4, 0.6);
+        let over = |rgb: Vec3, alpha: f32| base * (1. - alpha) + rgb;
+        assert_eq!(over(Vec3::ZERO, 0.), base);
+        assert!((over(vec3(0.4, 0., 0.), 0.4) - vec3(0.52, 0.24, 0.36)).length() < 1e-6);
+        assert!((over(vec3(0.1, 0.05, 0.), 0.) - vec3(0.3, 0.45, 0.6)).length() < 1e-6);
+        assert!(VIEW_OVERLAY.contains("gl_FragColor=texture2D(Overlay,p)"));
+        assert!(!VIEW_OVERLAY.contains("Reference"));
+    }
+
+    #[test]
     fn noise_canvas_matches_chart_camera_and_retains_outer_geometry() {
         use crate::practice_view::PracticeView;
         for (native, vp) in [(vec2(1920., 1080.), (0, 0, 1920, 1080)), (vec2(2400., 1080.), (240, 0, 1920, 1080))] {
@@ -1525,7 +1799,22 @@ mod tests {
                 };
                 let canvas = NoiseCanvas::new(view, vp, native);
                 let (w, h) = canvas.dimensions();
-                assert!(w <= 4096 && h <= 4096 && w as u64 * h as u64 <= 4_194_304);
+                use macroquad::camera::Camera;
+                let actual_native = canvas.camera(vec2(1., -aspect), vp, (w, h)).matrix();
+                let expected_native = canvas.projection(base, vp);
+                for (a, b) in actual_native.to_cols_array().into_iter().zip(expected_native.to_cols_array()) {
+                    assert!((a - b).abs() < 1e-5);
+                }
+                let tiles = noise_tiles(
+                    canvas,
+                    &[Coverage {
+                        min: vec2(-2., -2.),
+                        max: vec2(3., 3.),
+                    }],
+                );
+                for tile in tiles {
+                    assert_eq!(tile.canvas.dimensions(), (native.x as u32, native.y as u32));
+                }
                 let (cx, cy) = view.center(vp.2 as f32);
                 let actual = Mat4::from_scale(vec3(view.scale(), view.scale(), 1.)) * base * Mat4::from_translation(vec3(-cx, -cy, 0.));
                 for p in [Vec2::ZERO, vec2(7., -3.), vec2(-20., 12.)] {
@@ -1556,6 +1845,8 @@ mod tests {
     fn canonical_shader_maps_only_framebuffers_and_keeps_noise_coordinates() {
         let (vert, frag) = canvas_shader(include_str!("shaders/ActiveBlock_program_0.vert"), include_str!("shaders/ActiveBlock_program_0.glsl"));
         assert!(vert.contains("(texcoord * NoiseDomain.xy + NoiseDomain.zw)"));
+        assert!(frag.contains("u_xlatb0.x && NoiseExpanded<0.5"));
+        assert!(frag.contains("uniform vec4 NoiseInput_EffectRT"));
         assert!(vert.contains("vs_TEXCOORD3.xy=vs_TEXCOORD3.xy*NoiseDomain.xy"));
         for name in ["_SceneColor", "_MaskRT", "_EffectRT"] {
             assert!(frag.contains(&format!("noiseSample({name},")));
