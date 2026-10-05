@@ -63,6 +63,7 @@ pub struct HomePage {
     btn_msg: DRectButton,
     btn_settings: DRectButton,
     btn_user: DRectButton,
+    btn_replay: DRectButton,
 
     next_page: Option<NextPage>,
 
@@ -156,6 +157,7 @@ impl HomePage {
             btn_msg: DRectButton::new().with_radius(0.008).with_delta(-0.003).with_elevation(0.002),
             btn_settings: DRectButton::new().with_radius(0.008).with_delta(-0.003).with_elevation(0.002),
             btn_user: DRectButton::new().with_delta(-0.003),
+            btn_replay: DRectButton::new().with_delta(-0.003),
 
             next_page: None,
 
@@ -257,14 +259,16 @@ impl HomePage {
 
         if self.character.illust == "@" {
             let id = self.character.id.clone();
-            self.char_illu_task =
-                Some(Task::new(async move { Ok(image::load_from_memory(&crate::load_res(&format!("res/{id}.char")).await?)?) }));
+            self.char_illu_task = Some(Task::new(async move { Ok(image::load_from_memory(&crate::load_res(&format!("res/{id}.char")).await?)?) }));
         } else {
             let file = crate::page::File {
                 url: self.character.illust.clone(),
             };
-            self.char_illu_task =
-                Some(Task::new(async move { Ok(image::load_from_memory(&crate::resolve_res_data(file.fetch().await?.to_vec()).context("failed to decode downloaded character illustration")?)?) }));
+            self.char_illu_task = Some(Task::new(async move {
+                Ok(image::load_from_memory(
+                    &crate::resolve_res_data(file.fetch().await?.to_vec()).context("failed to decode downloaded character illustration")?,
+                )?)
+            }));
         }
     }
 
@@ -414,6 +418,10 @@ impl Page for HomePage {
             return Ok(true);
         }
         if self.char_screen_p.now(rt) < 1e-2 {
+            if self.btn_replay.touch(touch, t) {
+                self.next_page = Some(NextPage::Overlay(Box::new(super::replay::ReplayLibraryPage::new()?)));
+                return Ok(true);
+            }
             self.btn_play_3d.touch(touch, t);
             if self.btn_play.touch(touch, t) {
                 button_hit_large();
@@ -817,6 +825,14 @@ impl Page for HomePage {
 
         s.fader.roll_back();
         s.render_fader(ui, |ui| {
+            if cp < 1e-2 {
+                let r = Rect::new(0.865, -ui.top + 0.22, 0.11, 0.11);
+                self.btn_replay.build(ui, t, r, |ui, _| {
+                    ui.fill_rect(r, semi_black(0.25));
+                    ui.text("▶").pos(r.center().x, r.y + 0.014).anchor(0.5, 0.).size(0.5).draw();
+                    ui.text("回放").pos(r.center().x, r.bottom() - 0.018).anchor(0.5, 1.).size(0.3).draw();
+                });
+            }
             let rad = 0.05;
             let ct = (0.92, -ui.top + 0.08);
             self.btn_user.config.radius = rad;

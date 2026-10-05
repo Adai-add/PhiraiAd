@@ -50,6 +50,28 @@ fn main() -> anyhow::Result<()> {
     let f = ai_chart_adapter::extract(&doc, &mut || Ok(()))?;
     anyhow::ensure!(f.events.len() == 4, "RPE fake notes must be excluded");
     println!("RPE: {:?}", model.predict(&f, doc.hash, &mut || Ok(()))?.values);
+    // Integration: damaged optional fields, reversed animation and cyclic parents.
+    let mut broken = rpe.clone();
+    broken["BPMList"][0]["bpm"] = serde_json::json!(0);
+    broken["judgeLineList"][0]["father"] = serde_json::json!(0);
+    broken["judgeLineList"][0]["eventLayers"][0]["moveXEvents"][0]["endTime"] = serde_json::json!([-1, 0, 1]);
+    broken["judgeLineList"][0]["notes"][0]["size"] = serde_json::json!("invalid");
+    std::fs::write(root.path().join("chart.json"), serde_json::to_vec(&broken)?)?;
+    let doc = ai_model::cache::Document::load(root.path())?;
+    let f = ai_chart_adapter::extract(&doc, &mut || Ok(()))?;
+    anyhow::ensure!(f.events.len() == 4, "damaged RPE dropped valid notes");
+    model.predict(&f, doc.hash, &mut || Ok(()))?;
+    std::fs::write(root.path().join("chart.pec"), format!("{pec}\nunknown invalid command\ncm 0 5 2 0 0 1\n"))?;
+    std::fs::write(root.path().join("info.yml"), "chart: chart.pec\n")?;
+    let doc = ai_model::cache::Document::load(root.path())?;
+    let f = ai_chart_adapter::extract(&doc, &mut || Ok(()))?;
+    anyhow::ensure!(f.events.len() == 4, "PEC fallback dropped valid notes");
+    model.predict(&f, doc.hash, &mut || Ok(()))?;
+    std::fs::write(root.path().join("chart.pec"), "0\nbp 0 120\ncm 0 0 5 0 0 1\nn1 0 1 0 1 0\n# invalid inline modifier\n")?;
+    let doc = ai_model::cache::Document::load(root.path())?;
+    let f = ai_chart_adapter::extract(&doc, &mut || Ok(()))?;
+    anyhow::ensure!(f.events.len() == 1, "PEC animation fallback lost valid note");
+    model.predict(&f, doc.hash, &mut || Ok(()))?;
     // PBC conversion uses the actual binary writer/reader; no texture resources.
     let chart = prpr::parse::parse_pec(pec, prpr::core::ChartExtra::default())?;
     let mut bytes = Vec::new();

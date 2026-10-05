@@ -163,9 +163,18 @@ pub(crate) fn export_android_downloads(filename: &str, bytes: &[u8], mime_type: 
         put_string(env, values, values_class, "_display_name", filename)?;
         put_string(env, values, values_class, "mime_type", mime_type)?;
         put_string(env, values, values_class, "relative_path", relative_path)?;
-        if mime_type.starts_with("image/") { put_string(env, values, values_class, "is_pending", "1")?; }
+        if mime_type.starts_with("image/") {
+            put_string(env, values, values_class, "is_pending", "1")?;
+        }
 
-        let downloads_class = find_class(env, if mime_type.starts_with("image/") { "android/provider/MediaStore$Images$Media" } else { "android/provider/MediaStore$Downloads" })?;
+        let downloads_class = find_class(
+            env,
+            if mime_type.starts_with("image/") {
+                "android/provider/MediaStore$Images$Media"
+            } else {
+                "android/provider/MediaStore$Downloads"
+            },
+        )?;
         let field_name = CString::new("EXTERNAL_CONTENT_URI")?;
         let field_signature = CString::new("Landroid/net/Uri;")?;
         let uri_field = ((**env).v1_6.GetStaticFieldID)(env, downloads_class, field_name.as_ptr(), field_signature.as_ptr());

@@ -848,6 +848,11 @@ struct ChartList {
     auto_flip_btn: DRectButton,
     hold_head_effect_btn: DRectButton,
     correct_sound_btn: DRectButton,
+    replay_recording_btn: DRectButton,
+    normal_preserve_pitch_btn: DRectButton,
+    normal_note_flow_inverse_btn: DRectButton,
+    fullscreen_judge_btn: DRectButton,
+    fullscreen_score_btn: DRectButton,
     show_acc_btn: DRectButton,
     ap_fc_indicator_btn: DRectButton,
     show_avg_fps_btn: DRectButton,
@@ -882,6 +887,11 @@ impl ChartList {
             auto_flip_btn: DRectButton::new(),
             hold_head_effect_btn: DRectButton::new(),
             correct_sound_btn: DRectButton::new(),
+            replay_recording_btn: DRectButton::new(),
+            normal_preserve_pitch_btn: DRectButton::new(),
+            normal_note_flow_inverse_btn: DRectButton::new(),
+            fullscreen_judge_btn: DRectButton::new(),
+            fullscreen_score_btn: DRectButton::new(),
             show_acc_btn: DRectButton::new(),
             ap_fc_indicator_btn: DRectButton::new(),
             show_avg_fps_btn: DRectButton::new(),
@@ -904,6 +914,27 @@ impl ChartList {
         if self.replica && config.judgement_mode == JudgementMode::Custom && self.custom_edit_btn.touch(touch, t) {
             self.custom_edit_requested = true;
             return Ok(Some(false));
+        }
+        if self.replica && self.fullscreen_judge_btn.touch(touch, t) {
+            config.fullscreen_judgement ^= true;
+            self.fullscreen_score_btn = DRectButton::new();
+            return Ok(Some(true));
+        }
+        if self.replica && config.fullscreen_judgement && self.fullscreen_score_btn.touch(touch, t) {
+            config.fullscreen_judgement_counts_local_score ^= true;
+            return Ok(Some(true));
+        }
+        if self.replica && self.normal_preserve_pitch_btn.touch(touch, t) {
+            config.normal_preserve_pitch ^= true;
+            return Ok(Some(true));
+        }
+        if self.replica && self.normal_note_flow_inverse_btn.touch(touch, t) {
+            config.normal_note_flow_inverse ^= true;
+            return Ok(Some(true));
+        }
+        if self.replica && self.replay_recording_btn.touch(touch, t) {
+            config.replay_recording_enabled ^= true;
+            return Ok(Some(true));
         }
         if self.replica && self.correct_sound_btn.touch(touch, t) {
             config.correct_sound ^= true;
@@ -1110,6 +1141,32 @@ impl ChartList {
             }
         }
         if self.replica {
+            item! { w;
+                render_partition_title(ui, w, true, Cow::Borrowed("全屏判定"), Some(Cow::Borrowed("忽略触摸位置，保留时间判定及滑动、长按机制")));
+                render_switch(ui, rr, t, &mut self.fullscreen_judge_btn, config.fullscreen_judgement);
+            }
+            if config.fullscreen_judgement {
+                ui.dx(0.035);
+                let w = w - 0.035;
+                let rr = right_rect(w);
+                item! { w;
+                    render_partition_title(ui, w, true, Cow::Borrowed("计入本地成绩"), Some(Cow::Borrowed("是否保存使用全屏判定的本地成绩")));
+                    render_switch(ui, rr, t, &mut self.fullscreen_score_btn, config.fullscreen_judgement_counts_local_score);
+                }
+                ui.dx(-0.035);
+            }
+            item! { w;
+                render_partition_title(ui, w, true, Cow::Borrowed("是否启用录制"), None);
+                render_switch(ui, rr, t, &mut self.replay_recording_btn, config.replay_recording_enabled);
+            }
+            item! { w;
+                render_partition_title(ui, w, true, Cow::Borrowed("为非练习模式开启音高修复"), None);
+                render_switch(ui, rr, t, &mut self.normal_preserve_pitch_btn, config.normal_preserve_pitch);
+            }
+            item! { w;
+                render_partition_title(ui, w, true, Cow::Borrowed("为非练习模式开启流速设为速度的倒数"), None);
+                render_switch(ui, rr, t, &mut self.normal_note_flow_inverse_btn, config.normal_note_flow_inverse);
+            }
             self.judge_mode_btn.render_top(ui, t, 1.);
         }
         (w, h)
@@ -1491,6 +1548,10 @@ struct ReplicaList {
     noise_distortion_btn: DRectButton,
     noise_music_btn: DRectButton,
     noise_low_btn: DRectButton,
+    resources_btn: DRectButton,
+    resources_open: bool,
+    font_import_btn: DRectButton,
+    font_reset_btn: DRectButton,
 }
 impl ReplicaList {
     fn new() -> Self {
@@ -1517,12 +1578,31 @@ impl ReplicaList {
             noise_distortion_btn: DRectButton::new(),
             noise_music_btn: DRectButton::new(),
             noise_low_btn: DRectButton::new(),
+            resources_btn: DRectButton::new(),
+            resources_open: false,
+            font_import_btn: DRectButton::new(),
+            font_reset_btn: DRectButton::new(),
         }
     }
     fn top_touch(&mut self, touch: &Touch, t: f32) -> bool {
         (self.gameplay_open && self.chart.top_touch(touch, t)) || (self.ranges_open && self.debug.top_touch(touch, t))
     }
     fn touch(&mut self, touch: &Touch, t: f32) -> Result<Option<bool>> {
+        if self.resources_btn.touch(touch, t) {
+            self.resources_open ^= true;
+            self.font_import_btn = DRectButton::new();
+            self.font_reset_btn = DRectButton::new();
+            return Ok(Some(false));
+        }
+        if self.resources_open && self.font_import_btn.touch(touch, t) {
+            prpr::scene::request_file("_custom_font");
+            return Ok(Some(false));
+        }
+        if self.resources_open && self.font_reset_btn.touch(touch, t) {
+            crate::custom_font::reset()?;
+            show_message("已恢复默认字体").ok();
+            return Ok(Some(false));
+        }
         if self.timing_btn.touch(touch, t) {
             self.timing_open ^= true;
             self.timing_edit_btn = DRectButton::new();
@@ -1623,7 +1703,7 @@ impl ReplicaList {
             .draw();
         ui.dy(0.09);
         let mut h = 0.09;
-        for group in 0..5 {
+        for group in 0..6 {
             let (btn, open, label) = if group == 0 {
                 (&mut self.gameplay_btn, self.gameplay_open, tl!("replica-gameplay"))
             } else if group == 1 {
@@ -1632,6 +1712,8 @@ impl ReplicaList {
                 (&mut self.timing_btn, self.timing_open, Cow::Borrowed("按键准度条"))
             } else if group == 3 {
                 (&mut self.noise_btn, self.noise_open, Cow::Borrowed("噪域"))
+            } else if group == 4 {
+                (&mut self.resources_btn, self.resources_open, Cow::Borrowed("自定义资源"))
             } else {
                 (&mut self.reports_btn, self.reports_open, tl!("replica-reports"))
             };
@@ -1690,6 +1772,17 @@ impl ReplicaList {
                         } else {
                             (w, ITEM_HEIGHT)
                         }
+                    } else if group == 4 {
+                        let w = child.w;
+                        ui.fill_path(&Rect::new(0., 0., w, ITEM_HEIGHT - 0.012).rounded(0.012), Color::from_rgba(30, 49, 62, 180));
+                        let title_w = w - 0.23;
+                        let name = crate::custom_font::display_name();
+                        render_partition_title(ui, title_w, true, "自定义字体", Some(name.as_str().into()));
+                        let rr = right_rect(w);
+                        self.font_import_btn
+                            .render_text(ui, Rect::new(rr.x - 0.23, rr.y, 0.20, rr.h), t, "导入", 0.5, false);
+                        self.font_reset_btn.render_text(ui, rr, t, "恢复默认", 0.45, false);
+                        (w, ITEM_HEIGHT)
                     } else {
                         self.reports.render(ui, child, t)
                     }

@@ -131,9 +131,27 @@ impl Page for CustomJudgementEditor {
                 self.scroll.y_scroller.reset();
                 self.error.clear();
             }
-            if ui.button("custom_counts_score", Rect::new(-0.50, -top + 0.19, 0.70, 0.065),
-                if self.draft.current.counts_local_score { "此判定是否计成绩：是" } else { "此判定是否计成绩：否" }) {
+            if ui.button(
+                "custom_counts_score",
+                Rect::new(-0.50, -top + 0.19, 0.70, 0.065),
+                if self.draft.current.counts_local_score {
+                    "此判定是否计成绩：是"
+                } else {
+                    "此判定是否计成绩：否"
+                },
+            ) {
                 self.draft.current.counts_local_score ^= true;
+            }
+            let mut combo_ratio = format!("{}%", self.draft.current.combo_score_ratio * 100.);
+            ui.text("连击分数占比").pos(0.25, -top + 0.202).size(0.36).draw();
+            if Self::field(ui, "custom_combo_ratio", Rect::new(0.65, -top + 0.19, 0.29, 0.065), &mut combo_ratio) {
+                match combo_ratio.trim().trim_end_matches('%').trim().parse::<f64>() {
+                    Ok(v) if v.is_finite() && (0.0..=100.0).contains(&v) => {
+                        self.draft.current.combo_score_ratio = v / 100.;
+                        self.error.clear();
+                    }
+                    _ => self.error = "连击分数占比请输入 0 到 100 之间的百分比".into(),
+                }
             }
             let y = -top + 0.285;
             let height = (2. * top - 0.38).max(0.1);
@@ -169,9 +187,12 @@ impl Page for CustomJudgementEditor {
                     Dialog::plain("删除方案", format!("是否确认删除“{}”？", self.draft.schemes[i].name))
                         .buttons(vec!["取消".into(), "删除".into()])
                         .listener(move |_, button| {
-                            if button == 1 { confirmed.store(i + 1, Ordering::SeqCst); }
+                            if button == 1 {
+                                confirmed.store(i + 1, Ordering::SeqCst);
+                            }
                             false
-                        }).show();
+                        })
+                        .show();
                 }
             });
             ui.scope(|ui| {
@@ -192,7 +213,10 @@ impl Page for CustomJudgementEditor {
                         let mut boundary = format!("{}ms", draft.current.boundaries_ms[i]);
                         if Self::field(ui, &format!("custom_boundary_{i}"), Rect::new(0., 0., 0.24, 0.05), &mut boundary) {
                             match boundary.trim().trim_end_matches("ms").trim().parse::<f64>() {
-                                Ok(v) if v.is_finite() => { draft.current.boundaries_ms[i] = v; error.clear(); }
+                                Ok(v) if v.is_finite() => {
+                                    draft.current.boundaries_ms[i] = v;
+                                    error.clear();
+                                }
                                 _ => *error = "请输入有效的毫秒数".into(),
                             }
                         }
@@ -201,7 +225,10 @@ impl Page for CustomJudgementEditor {
                         let mut contribution = format!("{}%", band.contribution * 100.);
                         if Self::field(ui, &format!("custom_acc_{i}"), Rect::new(0.79, 0.042, 0.18, 0.05), &mut contribution) {
                             match contribution.trim().trim_end_matches('%').trim().parse::<f64>() {
-                                Ok(v) if v.is_finite() && v >= 0. => { band.contribution = v / 100.; error.clear(); }
+                                Ok(v) if v.is_finite() && v >= 0. => {
+                                    band.contribution = v / 100.;
+                                    error.clear();
+                                }
                                 _ => *error = "请输入非负的ACC百分比".into(),
                             }
                         }
@@ -217,7 +244,10 @@ impl Page for CustomJudgementEditor {
                                     _ => *error = "颜色请输入6位RGB或8位RGBA十六进制".into(),
                                 }
                             }
-                            ui.fill_rect(Rect::new(1.025, 0.052, 0.045, 0.03), Color::from_rgba(band.color[0], band.color[1], band.color[2], band.color[3]));
+                            ui.fill_rect(
+                                Rect::new(1.025, 0.052, 0.045, 0.03),
+                                Color::from_rgba(band.color[0], band.color[1], band.color[2], band.color[3]),
+                            );
                         } else {
                             ui.text("—").pos(1.23, 0.066).anchor(0.5, 0.5).size(0.32).draw();
                         }

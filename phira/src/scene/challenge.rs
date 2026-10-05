@@ -163,19 +163,28 @@ impl ChallengeScene {
         let top = ui.top;
         let screen = ui.screen_rect();
         crate::scene::TEX_BACKGROUND.with(|bg| {
-            if let Some(bg) = bg.borrow().as_ref() { ui.fill_rect(screen, (**bg, screen)); }
-            else { ui.fill_rect(screen, Color::from_rgba(31, 39, 51, 255)); }
+            if let Some(bg) = bg.borrow().as_ref() {
+                ui.fill_rect(screen, (**bg, screen));
+            } else {
+                ui.fill_rect(screen, Color::from_rgba(31, 39, 51, 255));
+            }
         });
         ui.fill_rect(screen, semi_black(0.25));
         const U: f32 = 2. / 2048.;
         let font = |pixels: f32| pixels * U * 1.121 / 0.08;
         let left = -750. * U;
         let width = 1500. * U;
-        self.back.render_text(ui, Rect::new(left, -top + 45. * U, 118. * U, 58. * U), t, "返回", font(26.), false);
-        self.retry.render_text(ui, Rect::new(-614. * U, -top + 45. * U, 210. * U, 58. * U), t, "重新开始", font(26.), false);
+        self.back
+            .render_text(ui, Rect::new(left, -top + 45. * U, 118. * U, 58. * U), t, "返回", font(26.), false);
+        self.retry
+            .render_text(ui, Rect::new(-614. * U, -top + 45. * U, 210. * U, 58. * U), t, "重新开始", font(26.), false);
         ui.text("课题结算").pos(-360. * U, -top + 86. * U).anchor(0., 1.).size(font(38.)).draw();
         ui.text(get_data().me.as_ref().map(|u| u.name.as_str()).unwrap_or("离线玩家"))
-            .pos(734. * U, -top + 83. * U).anchor(1., 1.).size(font(30.)).max_width(0.5).draw();
+            .pos(734. * U, -top + 83. * U)
+            .anchor(1., 1.)
+            .size(font(30.))
+            .max_width(0.5)
+            .draw();
         let gap = 20. * U;
         let row_h = (172. * U).min(((top * 2. - 158. * U - 0.19 - gap * 2.) / 3.).max(0.10));
         let row_scale = row_h / (172. * U);
@@ -187,31 +196,68 @@ impl ChallengeScene {
             ui.fill_path(&slanted_path(rect, 22. * U), Color::from_rgba(36, 47, 62, 242));
             let cover = Rect::new(left, y, 328. * U, row_h);
             ui.fill_path(&slanted_path(cover, 22. * U), self.charts[i].illu.shading(cover, t));
-            ui.text(["1st", "2nd", "3rd"][i]).pos(left + 32. * U, y + 29. * U * row_scale).anchor(0., 1.).size(font(20.)).draw();
+            ui.text(["1st", "2nd", "3rd"][i])
+                .pos(left + 32. * U, y + 29. * U * row_scale)
+                .anchor(0., 1.)
+                .size(font(20.))
+                .draw();
             let tx = -394. * U;
-            ui.text(&result.song.name).pos(tx, y + 68. * U * row_scale).anchor(0., 1.).size(title_size).max_width(title_width).draw();
+            ui.text(&result.song.name)
+                .pos(tx, y + 68. * U * row_scale)
+                .anchor(0., 1.)
+                .size(title_size)
+                .max_width(title_width)
+                .draw();
             let level = crate::challenge::difficulty_label(&result.song.level, result.song.difficulty);
             let badge = Rect::new(tx, y + 100. * U * row_scale, 76. * U, 42. * U * row_scale);
             ui.fill_path(&slanted_path(badge, 7. * U), Color::from_rgba(76, 92, 113, 255));
-            ui.text(level).pos(badge.center().x, badge.center().y).anchor(0.5, 0.5).no_baseline().size(font(23.)).draw();
-            ui.text(format!("{:.1}", result.song.difficulty)).pos(tx + 100. * U, y + 130. * U * row_scale).anchor(0., 1.).size(font(28.)).draw();
-            ui.text(format!("{:07}", result.score)).pos(46. * U, y + 74. * U * row_scale).anchor(0., 1.).size(font(65.)).draw();
+            ui.text(level)
+                .pos(badge.center().x, badge.center().y)
+                .anchor(0.5, 0.5)
+                .no_baseline()
+                .size(font(23.))
+                .draw();
+            ui.text(format!("{:.1}", result.song.difficulty))
+                .pos(tx + 100. * U, y + 130. * U * row_scale)
+                .anchor(0., 1.)
+                .size(font(28.))
+                .draw();
+            ui.text(format!("{:07}", result.score))
+                .pos(46. * U, y + 74. * U * row_scale)
+                .anchor(0., 1.)
+                .size(font(65.))
+                .draw();
             for (j, label) in ["Perfect", "Good", "Bad", "Miss"].iter().enumerate() {
                 let x = (74. + j as f32 * 90.) * U;
-                ui.text(result.counts[j].to_string()).pos(x, y + 122. * U * row_scale).anchor(0.5, 1.).size(font(28.)).draw();
+                ui.text(result.counts[j].to_string())
+                    .pos(x, y + 122. * U * row_scale)
+                    .anchor(0.5, 1.)
+                    .size(font(28.))
+                    .draw();
                 ui.text(*label).pos(x, y + 149. * U * row_scale).anchor(0.5, 1.).size(font(17.)).draw();
             }
             for (label, count, dy) in [("Early", result.early, 81.), ("Late", result.late, 124.)] {
                 ui.text(label).pos(460. * U, y + dy * U * row_scale).anchor(0., 1.).size(font(23.)).draw();
-                ui.text(count.to_string()).pos(694. * U, y + dy * U * row_scale).anchor(1., 1.).size(font(28.)).draw();
+                ui.text(count.to_string())
+                    .pos(694. * U, y + dy * U * row_scale)
+                    .anchor(1., 1.)
+                    .size(font(28.))
+                    .draw();
             }
         }
         ui.fill_path(&slanted_path(Rect::new(left, top - 0.17, width, 0.13), 22. * U), Color::from_rgba(27, 36, 50, 235));
         ui.text("总分").pos(0., top - 0.13).anchor(0.5, 1.).size(font(23.)).draw();
-        ui.text(format!("{:07}", self.progress.total())).pos(0., top - 0.065).anchor(0.5, 1.).size(font(61.)).draw();
-        if self.progress.total() == 3_000_000 { ui.text("φ").pos(0.19, top - 0.065).anchor(0., 1.).size(font(55.)).color(YELLOW).draw(); }
+        ui.text(format!("{:07}", self.progress.total()))
+            .pos(0., top - 0.065)
+            .anchor(0.5, 1.)
+            .size(font(61.))
+            .draw();
+        if self.progress.total() == 3_000_000 {
+            ui.text("φ").pos(0.19, top - 0.065).anchor(0., 1.).size(font(55.)).color(YELLOW).draw();
+        }
         ui.text("PhiraiAd").pos(left + 52. * U, top - 0.09).anchor(0., 1.).size(font(26.)).draw();
-        self.proceed.render_text(ui, Rect::new(486. * U, top - 0.14, 212. * U, 58. * U), t, "继续", font(26.), true);
+        self.proceed
+            .render_text(ui, Rect::new(486. * U, top - 0.14, 212. * U, 58. * U), t, "继续", font(26.), true);
     }
     fn render_badges(&mut self, ui: &mut Ui, t: f32) {
         let top = ui.top;

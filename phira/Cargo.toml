@@ -16,6 +16,7 @@ hykb = []
 event_debug = []
 
 [dependencies]
+ab_glyph = "0.2.32"
 anyhow = { workspace = true }
 arc-swap = "1.9.0"
 async-trait = { workspace = true }

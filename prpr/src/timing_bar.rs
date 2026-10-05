@@ -123,6 +123,15 @@ fn color(j: Judgement) -> Color {
 pub fn extent(scheme: Option<&Scheme>) -> f64 {
     scheme.map_or(EXTENT_SECONDS, |s| s.boundaries_ms[0].abs().max(s.boundaries_ms.last().unwrap().abs()) / 1000. + 0.020)
 }
+/// Widen the time axis when practice windows exceed the usual range;
+/// the bar's physical size and centre never change.
+pub fn profile_extent(profile: &JudgementRangeProfile, scheme: Option<&Scheme>) -> f64 {
+    if scheme.is_some() {
+        extent(scheme)
+    } else {
+        EXTENT_SECONDS.max(profile.tap_outer.early.max(profile.tap_outer.late) + 0.020)
+    }
+}
 fn band_color(scheme: &Scheme, stage: usize) -> Color {
     let c = scheme.bands[stage].color;
     Color::from_rgba(c[0], c[1], c[2], c[3])
@@ -161,7 +170,7 @@ pub fn render(ui: &mut Ui, config: &TimingBarConfig, state: &TimingBar, profile:
     };
     let half_height = ui.top;
     let pos = |n| position(config, half_height, n);
-    let extent = extent(scheme);
+    let extent = profile_extent(profile, scheme);
     let mut boundaries = if let Some(scheme) = scheme {
         let mut points = vec![-extent, 0., extent];
         points.extend(scheme.boundaries_ms.iter().map(|ms| -ms / 1000.));

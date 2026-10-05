@@ -180,7 +180,11 @@ impl BestBoard {
         let end = format!(" · B{}", self.cards.len());
         let middle_width = measure(ui, &middle);
         let end_width = measure(ui, &end);
-        let badge_width = self.course_badge.as_ref().map(|badge| (measure(ui, &badge.label()) + 0.04).max(0.10)).unwrap_or(0.);
+        let badge_width = self
+            .course_badge
+            .as_ref()
+            .map(|badge| (measure(ui, &badge.label()) + 0.04).max(0.10))
+            .unwrap_or(0.);
         let fixed_width = middle_width + badge_width + end_width;
         let name = fit_header_name(ui, &self.player, size, (right - left - fixed_width).max(0.001));
         let name_width = measure(ui, &name);
@@ -197,7 +201,9 @@ impl BestBoard {
         }
         ui.text(&end).pos(x, center_y).anchor(0., 0.5).no_baseline().size(size).draw();
     }
-    pub fn export_width(&self) -> f32 { BOARD_WIDTH }
+    pub fn export_width(&self) -> f32 {
+        BOARD_WIDTH
+    }
     pub fn export_height(&self) -> f32 {
         0.135 + self.cards_height() + 0.11
     }

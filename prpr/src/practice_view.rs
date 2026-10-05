@@ -45,6 +45,20 @@ impl PracticeView {
         (self.center_x * (2. / viewport_width), self.center_y * (2. / viewport_width))
     }
 
+    /// Final texture blit uses an upward-positive Y camera, unlike input/UI.
+    pub fn composite_target(self, viewport_width: f32, canvas_width: f32) -> (f32, f32) {
+        let (cx, cy) = self.center(viewport_width);
+        let ratio = viewport_width / canvas_width.max(1.);
+        (cx * ratio, -cy * ratio)
+    }
+
+    /// A finite original-window texture cannot represent this view's full frustum.
+    pub fn needs_expanded_view(self, width: f32, aspect: f32) -> bool {
+        let (cx, cy) = self.center(width.max(1.));
+        let scale = self.scale().abs();
+        cx.abs() + 1. / scale > 1. + 1e-5 || cy.abs() + 1. / (aspect * scale) > 1. / aspect + 1e-5
+    }
+
     pub fn screen_to_chart(self, x: f32, y: f32, viewport_width: f32) -> (f32, f32) {
         let (cx, cy) = self.center(viewport_width);
         (x / self.scale() + cx, y / self.scale() + cy)
@@ -168,5 +182,60 @@ mod tests {
         }
         .scale()
         .is_finite());
+    }
+}
+
+#[cfg(test)]
+mod composite_tests {
+    use super::*;
+    use macroquad::prelude::*;
+    #[test]
+    fn final_texture_camera_matches_input_mapping_at_all_scales() {
+        for percent in [5., 50., 100., 200., 500., -100.] {
+            let view = PracticeView {
+                scale_percent: percent,
+                center_x: 120.,
+                center_y: -80.,
+            };
+            let (width, canvas, aspect) = (960., 1920., 16. / 9.);
+            let ratio = width / canvas;
+            let (cx, cy) = view.composite_target(width, canvas);
+            let camera = Camera2D {
+                target: vec2(cx, cy),
+                zoom: vec2(1., aspect) * view.scale(),
+                ..Default::default()
+            };
+            let (x, y) = (0.3, -0.2);
+            let clip = camera.matrix() * vec4(x * ratio, -y * ratio, 0., 1.);
+            let expected = view.chart_to_screen(x, y, width);
+            assert!((clip.x - expected.0 * ratio).abs() < 1e-5);
+            assert!((-clip.y / aspect - expected.1 * ratio).abs() < 1e-5);
+        }
+    }
+}
+
+#[cfg(test)]
+mod expanded_tests {
+    use super::*;
+    #[test]
+    fn zoom_out_and_pan_need_full_frustum() {
+        assert!(!PracticeView::default().needs_expanded_view(1920., 16. / 9.));
+        for scale_percent in [5., 50., 95.] {
+            assert!(PracticeView {
+                scale_percent,
+                ..Default::default()
+            }
+            .needs_expanded_view(1920., 16. / 9.));
+        }
+        assert!(PracticeView {
+            center_x: 100.,
+            ..Default::default()
+        }
+        .needs_expanded_view(1920., 16. / 9.));
+        assert!(!PracticeView {
+            scale_percent: 200.,
+            ..Default::default()
+        }
+        .needs_expanded_view(1920., 16. / 9.));
     }
 }

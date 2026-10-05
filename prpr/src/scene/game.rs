@@ -150,6 +150,8 @@ pub struct GameScene {
     exercise_btns: (RectButton, RectButton),
     exercise_note_flow_speed: f32,
     exercise_note_flow_locked: bool,
+    exercise_judgement_percent: f32,
+    exercise_judgement_locked: bool,
     exercise_extra_open: bool,
 
     pub music: Music,
@@ -183,6 +185,15 @@ pub struct GameScene {
     preview_combo: Option<u32>,
     exercise_state_reset_pending: bool,
 
+    replay: Option<crate::replay::Recorder>,
+    replay_assets: crate::replay::Assets,
+    replay_armed: bool,
+    replay_view_hud: Option<crate::replay::Hud>,
+    replay_view_profile: Option<crate::judge::JudgementRangeProfile>,
+    replay_view_angle: Option<f32>,
+    replay_audio_speed: f64,
+    replay_audio_playing: bool,
+    replay_save_cooldown: f64,
     dead: bool,
 }
 
@@ -204,6 +215,8 @@ macro_rules! reset {
         $self.fps_total_time = 0.0;
         $self.fps_last_frame_time = $tm.real_time();
         $self.dead = false;
+        $self.pause_rewind = None;
+        $self.reset_replay();
     }};
 }
 
@@ -290,6 +303,13 @@ impl GameScene {
             _ => {}
         }
 
+        let capture_fs = crate::replay::CaptureFs::new(fs).with_enabled(config.replay_recording_enabled);
+        let replay_assets = capture_fs.assets.clone();
+        fs = Box::new(capture_fs);
+        // Also capture the illustration when LoadingScene used a preloaded texture.
+        if config.replay_recording_enabled {
+            let _ = fs.load_file(&info.illustration).await;
+        }
         let (mut chart, chart_bytes, chart_format) = Self::load_chart(fs.deref_mut(), &info).await?;
         if let Some(settings) = crate::chart_play::ChartPlaySettings::from_chart_bytes(&chart_bytes) {
             info.replica_play = settings;
@@ -333,6 +353,9 @@ impl GameScene {
                 .push(Effect::new(0.0..f64::INFINITY, include_str!("rainbow.glsl"), Vec::new(), false).unwrap());
         }
 
+        if config.replay_recording_enabled {
+            replay_assets.lock().unwrap().insert(info.chart.clone(), Arc::new(chart_bytes.clone()));
+        }
         let info_offset = info.offset;
         let mut res = Resource::new(
             config,
@@ -395,7 +418,19 @@ impl GameScene {
             (res.config.auto_export_play_report || res.config.touch_input_debug_report) && report_fn.is_some(),
         );
         play_report.set_chart_offset((chart.offset + info_offset + res.config.offset) as f64);
+        let replay = (res.config.replay_recording_enabled && matches!(mode, GameMode::Normal | GameMode::NoRetry))
+            .then(|| crate::replay::Recorder::new(&res, replay_assets.clone(), false, [0., res.track_length]));
+        res.replay_capture = replay.is_some();
         Ok(Self {
+            replay,
+            replay_assets,
+            replay_armed: false,
+            replay_view_hud: None,
+            replay_view_profile: None,
+            replay_view_angle: None,
+            replay_audio_speed: 0.,
+            replay_audio_playing: false,
+            replay_save_cooldown: f64::NEG_INFINITY,
             should_exit: false,
             next_scene: None,
 
@@ -421,6 +456,8 @@ impl GameScene {
             exercise_btns: (RectButton::new(), RectButton::new()),
             exercise_note_flow_speed: 1.,
             exercise_note_flow_locked: false,
+            exercise_judgement_percent: 100.,
+            exercise_judgement_locked: false,
             exercise_extra_open: false,
 
             music,
@@ -456,6 +493,230 @@ impl GameScene {
         })
     }
 
+    fn begin_armed_replay(&mut self) {
+        if crate::replay::start_practice_recording(
+            self.res.config.replay_recording_enabled,
+            self.mode == GameMode::Exercise,
+            self.replay_armed,
+            &mut self.replay,
+            || crate::replay::Recorder::new(&self.res, self.replay_assets.clone(), true, [self.exercise_range.start, self.exercise_range.end]),
+        ) {
+            self.res.replay_capture = true;
+            self.res.replay_fx.clear();
+            self.res.replay_sounds.clear();
+        }
+    }
+    fn reset_replay(&mut self) {
+        // Reset paths must save the tape before replacing the recorder, even
+        // when an automatic boundary or a retry bypasses a render-time pause.
+        self.finish_practice_replay();
+        self.replay = (self.res.config.replay_recording_enabled && matches!(self.mode, GameMode::Normal | GameMode::NoRetry))
+            .then(|| crate::replay::Recorder::new(&self.res, self.replay_assets.clone(), false, [0., self.res.track_length]));
+        self.res.replay_capture = self.replay.is_some();
+        self.res.replay_fx.clear();
+        self.res.replay_sounds.clear();
+    }
+    fn capture_replay_frame(&mut self, tm: &TimeManager) {
+        if let Some(recorder) = &mut self.replay {
+            let paused = tm.paused() && !self.auto_flip.rotating();
+            if !paused || !recorder.paused {
+                recorder.frame(
+                    &mut self.res,
+                    &self.chart,
+                    &self.judge,
+                    tm.real_time(),
+                    tm.now(),
+                    self.auto_flip.angle(tm.real_time()),
+                    self.pause_rewind.is_some(),
+                    self.auto_flip.rotating(),
+                    !self.music.paused(),
+                    &self.bad_notes,
+                    match self.state {
+                        State::Starting => 0,
+                        State::BeforeMusic => 1,
+                        State::Playing => 2,
+                        State::Ending => 3,
+                    },
+                    self.pause_rewind.and_then(|at| {
+                        let dt = tm.now() - at;
+                        let n = 3 - dt.floor() as i32;
+                        (n > 0).then_some((n.clamp(1, 3) as u8, (1. - dt as f32 / 3.).clamp(0., 1.)))
+                    }),
+                );
+            }
+            recorder.paused = paused;
+        }
+    }
+    fn save_replay(&mut self, real: f64) {
+        if real - self.replay_save_cooldown < 1. {
+            return;
+        }
+        if let Some(recorder) = &self.replay {
+            match recorder.payload() {
+                Ok(payload) => {
+                    crate::replay::save_background(payload);
+                    self.replay_save_cooldown = real;
+                }
+                Err(err) => {
+                    show_message(format!("{err:#}")).error();
+                }
+            }
+        }
+    }
+    fn finish_practice_replay(&mut self) {
+        if let Some(recorder) = crate::replay::take_practice_recording(self.mode == GameMode::Exercise, &mut self.replay_armed, &mut self.replay) {
+            self.res.replay_capture = false;
+            tracing::info!(frames = recorder.frames.len(), "practice replay finalized before pause/reset");
+            match recorder.into_payload() {
+                Ok(payload) => crate::replay::save_background(payload),
+                Err(err) => {
+                    show_message(format!("{err:#}")).error();
+                }
+            }
+        }
+    }
+    pub fn prepare_replay(&mut self) {
+        self.replay = None;
+        self.res.replay_capture = false;
+        self.res.replay_view = true;
+        self.res.config.interactive = false;
+        self.res.config.timing_bar.enabled = false;
+        self.note_conversion_backup
+            .apply(&mut self.chart, self.res.info.replica_play.note_conversion);
+        self.judge = Judge::new(&self.chart);
+        self.correct_sound_events = Self::build_correct_sound_events(&self.chart, &self.res);
+        self.res.rotate_chart = self.res.config.auto_flip_enabled && !self.res.info.replica_play.auto_flip_intervals.is_empty();
+    }
+    pub fn apply_replay_notes(&mut self, frame: &crate::replay::Frame) {
+        for delta in &frame.notes {
+            if let Some(note) = self
+                .chart
+                .lines
+                .get_mut(delta.line as usize)
+                .and_then(|l| l.notes.get_mut(delta.note as usize))
+            {
+                note.judge = delta.state.restore();
+            }
+        }
+        for (line, (notes, cursor)) in self.chart.lines.iter().zip(&mut self.judge.notes) {
+            *cursor = notes
+                .iter()
+                .position(|id| !matches!(line.notes[*id as usize].judge, crate::judge::JudgeStatus::Judged))
+                .unwrap_or(notes.len());
+        }
+    }
+    pub fn clear_replay_effects(&mut self) {
+        self.res.emitter.emitter.clear();
+        self.res.emitter.emitter_square.clear();
+        self.bad_notes.clear();
+    }
+    pub fn emit_replay_effects(&mut self, frame: &crate::replay::Frame, sounds: bool) {
+        for fx in &frame.fx {
+            let size = self.res.emitter.emitter.config.size;
+            let square = self.res.emitter.emitter_square.config.size;
+            self.res.emitter.emitter.config.size *= fx.size_ratio;
+            self.res.emitter.emitter_square.config.size *= fx.size_ratio;
+            self.res
+                .emitter
+                .emit_at(vec2(fx.position[0], fx.position[1]), fx.rotation, crate::replay::color(fx.color));
+            self.res.emitter.emitter.config.size = size;
+            self.res.emitter.emitter_square.config.size = square;
+        }
+        if sounds {
+            for sound in &frame.sounds {
+                sound.play(&mut self.res);
+            }
+        }
+    }
+    pub fn sync_replay_audio(&mut self, frame: &crate::replay::Frame, rate: f32, force: bool, playing: bool) -> Result<()> {
+        let target_speed = frame.speed as f64 * rate as f64;
+        let needs_rebuild = (self.replay_audio_speed - target_speed).abs() > 1e-5 || self.music.preserves_pitch() != frame.preserve_pitch;
+        if needs_rebuild {
+            let offset = self.offset() as f64;
+            self.music.pause()?;
+            self.music = Music::new_replay(
+                &mut self.res.audio,
+                self.res.music.clone(),
+                MusicParams {
+                    amplifier: self.res.config.volume_music as _,
+                    playback_rate: target_speed,
+                    ..Default::default()
+                },
+                frame.preserve_pitch,
+                self.res.has_noise_area && !self.res.config.noise_area.music_unaffected,
+                self.correct_sound_events
+                    .as_ref()
+                    .map(|events| crate::correct_sound::CorrectSoundTrack::new(events.clone(), offset, self.res.config.volume_sfx)),
+            )?;
+            self.replay_audio_speed = target_speed;
+            self.replay_audio_playing = false;
+        }
+        let audible = playing && frame.audible && frame.song >= 0. && frame.song < self.res.track_length;
+        let song = frame.song.clamp(0., (self.res.track_length - 0.001).max(0.));
+        if force || needs_rebuild || audible && (self.music.position() - song).abs() > 0.12 {
+            self.music.seek_to(song)?;
+        }
+        // Compare requested state, not the asynchronous audio-thread acknowledgement.
+        // A paused/count-in frame must not enqueue another Pause every render frame.
+        if let Some(playing) = crate::replay::audio_transition(self.replay_audio_playing, audible) {
+            if playing {
+                self.music.play()?;
+            } else {
+                self.music.pause()?;
+            }
+            self.replay_audio_playing = playing;
+        }
+        self.music.set_noise_touch(!frame.blocked.is_empty(), get_frame_time());
+        Ok(())
+    }
+    pub fn advance_replay_effects(&mut self, dt: f32) {
+        self.res.emitter.emitter.advance(dt);
+        self.res.emitter.emitter_square.advance(dt);
+    }
+    pub fn render_replay_frame(&mut self, frame: &crate::replay::Frame, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
+        self.res.update_size(ui.viewport);
+        self.state = match frame.phase {
+            0 => State::Starting,
+            1 => State::BeforeMusic,
+            3 => State::Ending,
+            _ => State::Playing,
+        };
+        self.res.time = frame.chart;
+        self.res.alpha = frame.alpha;
+        self.res.note_flow_speed = frame.flow;
+        self.res.config.speed = frame.speed;
+        self.res.config.practice_judgement_multiplier = frame.judgement_multiplier;
+        self.res.practice_view = crate::practice_view::PracticeView {
+            scale_percent: frame.view[0],
+            center_x: frame.view[1] * self.res.camera.viewport.map_or(frame.viewport_width, |vp| vp.2 as f32) / frame.viewport_width.max(1.),
+            center_y: frame.view[2] * self.res.camera.viewport.map_or(frame.viewport_width, |vp| vp.2 as f32) / frame.viewport_width.max(1.),
+        };
+        self.res.auto_flip_y = frame.flip_y;
+        self.res.judge_line_color = crate::replay::color(frame.line_color);
+        self.bad_notes = frame
+            .bad_visuals
+            .iter()
+            .map(|n| BadNote {
+                time: n.time,
+                kind: n.kind.clone(),
+                matrix: Matrix::from_column_slice(&n.matrix),
+            })
+            .collect();
+        self.replay_view_profile = Some(frame.profile);
+        self.replay_view_angle = Some(frame.angle);
+        self.replay_view_hud = Some(frame.hud.clone());
+        self.judge.noise_state.blocked_ids = frame.blocked.iter().copied().collect();
+        self.judge.noise_state.positions = frame.noise_positions.iter().map(|p| vec2(p[0], p[1])).collect();
+        for (h, (id, p, scale)) in self.judge.noise_state.hovers.iter_mut().zip(&frame.hovers) {
+            h.finger = *id;
+            h.position = vec2(p[0], p[1]);
+            h.scale = *scale;
+        }
+        self.chart.update(&mut self.res);
+        tm.seek_to(frame.song);
+        <Self as Scene>::render(self, tm, ui)
+    }
+
     fn build_correct_sound_events(chart: &Chart, res: &Resource) -> Option<Arc<Vec<crate::correct_sound::ScheduledHit>>> {
         res.config.correct_sound.then(|| {
             let mut events = Vec::new();
@@ -484,7 +745,8 @@ impl GameScene {
         events: &Option<Arc<Vec<crate::correct_sound::ScheduledHit>>>,
         chart_offset: f64,
     ) -> Result<Music> {
-        Music::new(
+        let create = if *mode == GameMode::View { Music::new_replay } else { Music::new };
+        create(
             &mut res.audio,
             res.music.clone(),
             MusicParams {
@@ -492,7 +754,7 @@ impl GameScene {
                 playback_rate: res.config.speed as _,
                 ..Default::default()
             },
-            *mode == GameMode::Exercise && res.config.practice_preserve_pitch,
+            res.config.preserve_pitch_for(*mode == GameMode::Exercise),
             res.has_noise_area && !res.config.noise_area.music_unaffected,
             events.as_ref().map(|events| {
                 crate::correct_sound::CorrectSoundTrack::new(events.clone(), chart_offset + res.config.offset as f64, res.config.volume_sfx)
@@ -508,13 +770,17 @@ impl GameScene {
         ((1. / playback_speed.max(PLAYBACK_SPEED_MIN) * 1000.).round() / 1000.).clamp(NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_MAX)
     }
 
+    fn note_flow_locked(&self) -> bool {
+        self.res
+            .config
+            .note_flow_inverse_for(self.mode == GameMode::Exercise, self.exercise_note_flow_locked)
+    }
+
     fn practice_note_flow_speed(&self) -> f32 {
-        if self.mode == GameMode::Exercise {
-            if self.exercise_note_flow_locked {
-                Self::locked_note_flow_speed(self.res.config.speed)
-            } else {
-                self.exercise_note_flow_speed
-            }
+        if self.note_flow_locked() {
+            Self::locked_note_flow_speed(self.res.config.speed)
+        } else if self.mode == GameMode::Exercise {
+            self.exercise_note_flow_speed
         } else {
             1.
         }
@@ -524,7 +790,21 @@ impl GameScene {
         self.res.config.effective_note_flow_speed(self.practice_note_flow_speed())
     }
 
+    fn practice_judgement_multiplier(&self) -> f32 {
+        if self.mode != GameMode::Exercise {
+            1.
+        } else if self.exercise_judgement_locked {
+            1. / self.res.config.speed.max(PLAYBACK_SPEED_MIN)
+        } else {
+            self.exercise_judgement_percent / 100.
+        }
+    }
+
     fn sync_note_flow_speed(&mut self) {
+        if self.res.replay_view {
+            return;
+        }
+        self.res.config.practice_judgement_multiplier = self.practice_judgement_multiplier();
         self.res.note_flow_speed = self.effective_note_flow_speed();
     }
 
@@ -559,12 +839,17 @@ impl GameScene {
             song_time,
             real_time,
             note_flow_speed,
-            self.exercise_note_flow_locked,
+            self.note_flow_locked(),
         );
     }
 
     fn capture_play_report_events(&mut self, song_time: f64, real_time: f64) {
         let events = self.judge.take_report_judgements();
+        if let Some(recorder) = &mut self.replay {
+            for event in &events {
+                recorder.outcome(event, &self.chart, &self.res);
+            }
+        }
         // Hold heads are emitted immediately, while Tap finals are queued until
         // the end of judge.update. Restore input-time order within each frame.
         let mut ordered: Vec<_> = events.iter().collect();
@@ -594,9 +879,14 @@ impl GameScene {
                     display_event.difference = (event.time - note.time) / self.res.config.speed as f64;
                 }
                 let scheme =
-                    (self.res.config.judgement_mode == crate::config::JudgementMode::Custom).then(|| self.res.config.custom_judgement.effective());
-                self.timing_bar
-                    .record_scaled(&display_event, &note.kind, &self.res.config.timing_bar, real_time, crate::timing_bar::extent(scheme));
+                    (self.res.config.judgement_mode == crate::config::JudgementMode::Custom).then(|| self.res.config.effective_custom_judgement());
+                self.timing_bar.record_scaled(
+                    &display_event,
+                    &note.kind,
+                    &self.res.config.timing_bar,
+                    real_time,
+                    crate::timing_bar::profile_extent(&self.judge.judgement_range_profile(&self.res.config), scheme.as_deref()),
+                );
             }
         }
         self.play_report.record_events(events);
@@ -679,7 +969,17 @@ impl GameScene {
                 1. - (t / (AFTER_TIME + 0.3)).min(1.).powi(2)
             }
         } as f32;
-        let combo = self.preview_combo.unwrap_or_else(|| self.judge.combo());
+        let combo = self
+            .replay_view_hud
+            .as_ref()
+            .map(|h| h.combo)
+            .or(self.preview_combo)
+            .unwrap_or_else(|| self.judge.combo());
+        let replay_score = self.replay_view_hud.as_ref().map_or_else(|| self.judge.score(), |h| h.score);
+        let replay_acc = self
+            .replay_view_hud
+            .as_ref()
+            .map_or_else(|| self.judge.real_time_accuracy(), |h| h.accuracy);
         let res = &mut self.res;
         let eps = 2e-2 / res.aspect_ratio;
         let top = -1. / res.aspect_ratio;
@@ -722,7 +1022,7 @@ impl GameScene {
             let h = 0.07;
             let score_top = top + eps * 2.2 - (1. - p) * 0.4;
             let score_right = 1. - margin;
-            let score = format!("{:07}", self.judge.score());
+            let score = format!("{:07}", replay_score);
             let scale_point = legacy_aui.then(|| {
                 let ct = ui.text(&score).size(0.8).measure_using(&PGR_FONT).center();
                 (score_right - ct.x, score_top + ct.y)
@@ -736,7 +1036,7 @@ impl GameScene {
                         .color(c)
                         .draw_using(&PGR_FONT);
                     if res.config.show_acc {
-                        ui.text(format!("{:05.2}%", self.judge.real_time_accuracy() * 100.))
+                        ui.text(format!("{:05.2}%", replay_acc * 100.))
                             .pos(1. - margin, score_top + h)
                             .anchor(1., 0.)
                             .size(0.4)
@@ -861,7 +1161,7 @@ impl GameScene {
         if !tm.paused() || self.mode != GameMode::Exercise {
             Ui::clear_practice_speed_drag();
         }
-        if self.mode == GameMode::EditChartPlay || self.auto_flip.rotating() {
+        if self.res.replay_view || self.mode == GameMode::EditChartPlay || self.auto_flip.rotating() {
             return Ok(());
         }
         let c = semi_white(self.res.alpha);
@@ -924,7 +1224,7 @@ impl GameScene {
                 if self.mode == GameMode::Exercise {
                     pos = tm.now();
                 }
-                let preserve_pitch = self.mode == GameMode::Exercise && res.config.practice_preserve_pitch;
+                let preserve_pitch = res.config.preserve_pitch_for(self.mode == GameMode::Exercise);
                 if clicked == Some(0) && ((tm.speed - res.config.speed as f64).abs() > 1e-6 || self.music.preserves_pitch() != preserve_pitch) {
                     self.music = Self::new_music(res, &self.mode, &self.correct_sound_events, (self.chart.offset + self.info_offset) as f64)?;
                 }
@@ -949,6 +1249,8 @@ impl GameScene {
                 let previous_playback_speed = self.res.config.speed;
                 let previous_manual_note_flow_speed = self.exercise_note_flow_speed;
                 let previous_note_flow_lock = self.exercise_note_flow_locked;
+                let previous_judgement_percent = self.exercise_judgement_percent;
+                let previous_judgement_lock = self.exercise_judgement_locked;
                 let asp = self.touch_scale();
                 for touch in ui.ensure_touches() {
                     touch.position *= asp;
@@ -998,6 +1300,11 @@ impl GameScene {
                     });
                 });
                 ui.scope(|ui| {
+                    ui.dx(-0.22);
+                    ui.dy(-0.49);
+                    ui.checkbox(tl!("preserve-pitch"), &mut self.res.config.practice_preserve_pitch);
+                });
+                ui.scope(|ui| {
                     ui.dx(0.3);
                     ui.dy(-0.48);
                     ui.practice_speed_slider(
@@ -1008,25 +1315,53 @@ impl GameScene {
                         &mut self.res.config.speed,
                         Some(0.46),
                     );
-                    ui.dy(0.19);
-                    let mut displayed_note_flow_speed = self.practice_note_flow_speed();
-                    let previous_note_flow_speed = displayed_note_flow_speed;
+                    ui.dy(0.165);
+                    let mut displayed = self.practice_note_flow_speed();
+                    let previous = displayed;
                     ui.practice_speed_slider(
                         "exercise_note_flow",
                         tl!("note-flow-speed"),
                         NOTE_FLOW_SPEED_MIN..NOTE_FLOW_SPEED_MAX,
                         NOTE_FLOW_SPEED_STEP,
-                        &mut displayed_note_flow_speed,
+                        &mut displayed,
                         Some(0.46),
                     );
-                    if (displayed_note_flow_speed - previous_note_flow_speed).abs() > f32::EPSILON {
-                        self.exercise_note_flow_speed = displayed_note_flow_speed;
+                    if (displayed - previous).abs() > f32::EPSILON {
+                        self.exercise_note_flow_speed = displayed;
                         self.exercise_note_flow_locked = false;
                     }
-                    ui.dy(0.19);
-                    ui.checkbox(tl!("lock-note-flow-speed"), &mut self.exercise_note_flow_locked);
-                    ui.dy(0.07);
-                    ui.checkbox(tl!("preserve-pitch"), &mut self.res.config.practice_preserve_pitch);
+                    ui.scope(|ui| {
+                        ui.dx(0.40);
+                        ui.with(Matrix::new_scaling(0.65), |ui| {
+                            ui.checkbox_with_id("exercise_note_flow_inverse", "速度的倒数", &mut self.exercise_note_flow_locked);
+                        });
+                    });
+                    ui.dy(0.165);
+                    let mut displayed = self.practice_judgement_multiplier() * 100.;
+                    let previous = displayed;
+                    ui.practice_value_slider(
+                        "exercise_judgement",
+                        "判定区间倍数",
+                        crate::practice_view::SliderSpec {
+                            min: 10.,
+                            max: 300.,
+                            midpoint: 100.,
+                            step: 1.,
+                            suffix: "%",
+                        },
+                        &mut displayed,
+                        Some(0.46),
+                    );
+                    if (displayed - previous).abs() > f32::EPSILON {
+                        self.exercise_judgement_percent = displayed;
+                        self.exercise_judgement_locked = false;
+                    }
+                    ui.scope(|ui| {
+                        ui.dx(0.40);
+                        ui.with(Matrix::new_scaling(0.65), |ui| {
+                            ui.checkbox_with_id("exercise_judgement_inverse", "速度的倒数", &mut self.exercise_judgement_locked);
+                        });
+                    });
                 });
                 if self.res.config.practice_preserve_pitch != previous_pitch {
                     if let Err(error) = crate::practice_audio::save_preference(self.res.config.practice_preserve_pitch) {
@@ -1036,7 +1371,9 @@ impl GameScene {
                 }
                 practice_settings_changed |= (self.res.config.speed - previous_playback_speed).abs() > f32::EPSILON
                     || (self.exercise_note_flow_speed - previous_manual_note_flow_speed).abs() > f32::EPSILON
-                    || self.exercise_note_flow_locked != previous_note_flow_lock;
+                    || self.exercise_note_flow_locked != previous_note_flow_lock
+                    || self.exercise_judgement_percent != previous_judgement_percent
+                    || self.exercise_judgement_locked != previous_judgement_lock;
                 let viewport_width = self.res.camera.viewport.map_or(screen_width(), |vp| vp.2 as f32);
                 let timeline_y = crate::practice_view::timeline_position(screen_height(), viewport_width);
                 ui.dy(timeline_y);
@@ -1168,12 +1505,16 @@ impl GameScene {
                 self.judge.advance_to(&mut self.chart, chart_time);
             }
             self.exercise_state_reset_pending = false;
+            // Restart is another run-start, just like Continue. Start only after
+            // reset has finished the previous tape and restored the chart state.
+            self.begin_armed_replay();
         }
         if practice_settings_changed {
             self.finish_play_report(ReportEndReason::PracticeSettingsChanged, practice_report_cutoff, tm.real_time());
             self.exercise_state_reset_pending = true;
         }
         if resume_requested {
+            self.begin_armed_replay();
             self.resume_from_pause(tm, None)?;
             if self.res.rotate_chart {
                 let at = (tm.now() + 3. - self.offset() as f64).max(0.);
@@ -1205,6 +1546,49 @@ impl GameScene {
         Ok(())
     }
 
+    fn pause_replay_rect(top: f32, practice: bool) -> Rect {
+        let (width, height) = if practice { (0.60 * 0.7, 0.075 * 0.7) } else { (0.31, 0.075) };
+        Rect::new(0.96 - width, -top + 0.025, width, height)
+    }
+
+    fn render_pause_replay_control(&mut self, tm: &mut TimeManager, ui: &mut Ui) {
+        if !tm.paused()
+            || !self.res.config.interactive
+            || !self.res.config.replay_recording_enabled
+            || self.res.replay_view
+            || self.mode == GameMode::EditChartPlay
+            || self.auto_flip.rotating()
+        {
+            return;
+        }
+        let previous_viewport = self.gl.quad_gl.get_viewport();
+        push_camera_state();
+        set_camera(&Camera2D {
+            render_target: self.res.camera.render_target,
+            ..ui.camera()
+        });
+        ui.abs_scope(|ui| {
+            ui.screen_touch_scope(|ui| {
+                let practice = self.mode == GameMode::Exercise;
+                let rect = Self::pause_replay_rect(ui.top, practice);
+                if practice {
+                    let label = if self.replay_armed {
+                        "✓ 记录回放直到下一次暂停"
+                    } else {
+                        "记录回放直到下一次暂停"
+                    };
+                    if ui.button_with_size("replay_arm", rect, label, 0.42 * 0.7) {
+                        self.replay_armed = !self.replay_armed;
+                    }
+                } else if self.replay.is_some() && ui.button("replay_save_pause", rect, "保存目前回放") {
+                    self.save_replay(tm.real_time());
+                }
+            })
+        });
+        pop_camera_state();
+        self.gl.quad_gl.viewport(previous_viewport);
+    }
+
     fn interactive(res: &Resource, state: &State) -> bool {
         res.config.interactive && matches!(state, State::Playing)
     }
@@ -1233,7 +1617,10 @@ impl GameScene {
         if !tm.paused() {
             return Ok(());
         }
-        let preserve = self.mode == GameMode::Exercise && self.res.config.practice_preserve_pitch;
+        if boundary.is_none() {
+            self.begin_armed_replay();
+        }
+        let preserve = self.res.config.preserve_pitch_for(self.mode == GameMode::Exercise);
         let mut pos = boundary.unwrap_or_else(|| {
             if self.mode == GameMode::Exercise {
                 tm.now()
@@ -1409,6 +1796,11 @@ impl Scene for GameScene {
         Ui::clear_practice_speed_drag();
         self.auto_flip.interrupt();
         self.sync_auto_flip();
+        self.capture_replay_frame(tm);
+        self.finish_practice_replay();
+        if let Some(recorder) = &mut self.replay {
+            recorder.reset_clock();
+        }
         self.judge.clear_touch_input_with_source(TouchDebugClearSource::AppLifecyclePause);
         if !tm.paused() {
             self.pause_rewind = None;
@@ -1428,6 +1820,8 @@ impl Scene for GameScene {
     }
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
+        crate::replay::poll_saves();
+        self.res.config.practice_judgement_multiplier = self.practice_judgement_multiplier();
         self.offset_analysis
             .update(&self.chart, &self.res, self.info_offset, tm.real_time() as f32);
 
@@ -1448,7 +1842,11 @@ impl Scene for GameScene {
                 return Ok(());
             }
         }
-        if self.mode == GameMode::Exercise && tm.now() > self.exercise_range.end && !tm.paused() {
+        if self.mode == GameMode::Exercise
+            && crate::replay::practice_range_finished(tm.now(), self.exercise_range.end, self.res.track_length, tm.paused())
+        {
+            self.capture_replay_frame(tm);
+            self.finish_practice_replay();
             self.finish_play_report(ReportEndReason::PracticeRangeCompleted, self.exercise_range.end, tm.real_time());
             let state = self.state.clone();
             reset!(self, self.res, tm);
@@ -1522,6 +1920,8 @@ impl Scene for GameScene {
             State::Ending => {
                 let t = time - self.res.track_length - WAIT_TIME;
                 if t >= AFTER_TIME + 0.3 {
+                    self.capture_replay_frame(tm);
+                    self.finish_practice_replay();
                     self.finish_play_report(ReportEndReason::Completed, self.res.track_length, tm.real_time());
                     if self.res.config.challenge_mode {
                         self.music.pause()?;
@@ -1582,25 +1982,31 @@ impl Scene for GameScene {
                                     }
                                 }
                             }
-                            Some(NextScene::Overlay(Box::new(EndingScene::new(
-                                self.res.background.clone(),
-                                self.res.illustration.clone(),
-                                self.res.player.clone(),
-                                self.res.icons.clone(),
-                                self.res.icon_retry.clone(),
-                                self.res.icon_proceed.clone(),
-                                self.res.mod_icons.clone(),
-                                self.res.info.clone(),
-                                self.judge.result(),
-                                &self.res.config,
-                                self.res.res_pack.ending.clone(),
-                                self.upload_fn.as_ref().map(Arc::clone),
-                                self.player.as_ref().map(|it| it.rks),
-                                historic_best,
-                                record_data,
-                                self.best_record.clone(),
-                                if self.res.config.show_avg_fps { self.get_avg_fps() } else { None },
-                            )?)))
+                            Some(NextScene::Overlay(Box::new(
+                                EndingScene::new(
+                                    self.res.background.clone(),
+                                    self.res.illustration.clone(),
+                                    self.res.player.clone(),
+                                    self.res.icons.clone(),
+                                    self.res.icon_retry.clone(),
+                                    self.res.icon_proceed.clone(),
+                                    self.res.mod_icons.clone(),
+                                    self.res.info.clone(),
+                                    self.judge.result(),
+                                    &self.res.config,
+                                    self.res.res_pack.ending.clone(),
+                                    self.upload_fn.as_ref().map(Arc::clone),
+                                    self.player.as_ref().map(|it| it.rks),
+                                    historic_best,
+                                    record_data,
+                                    self.best_record.clone(),
+                                    if self.res.config.show_avg_fps { self.get_avg_fps() } else { None },
+                                )?
+                                .with_replay({
+                                    self.res.replay_capture = false;
+                                    self.replay.take().and_then(|recorder| recorder.into_payload().ok())
+                                }),
+                            )))
                         }
                         GameMode::TweakOffset => Some(NextScene::PopWithResult(Box::new(None::<f32>))),
                         GameMode::Exercise | GameMode::EditChartPlay => None,
@@ -1677,6 +2083,9 @@ impl Scene for GameScene {
         }
         self.res.judge_line_color.a *= self.res.alpha;
         self.chart.update(&mut self.res);
+        if tm.paused() && self.res.config.interactive && is_key_pressed(KeyCode::Space) {
+            self.begin_armed_replay();
+        }
         let res = &mut self.res;
         if res.config.interactive && is_key_pressed(KeyCode::Space) {
             if tm.paused() {
@@ -1747,6 +2156,21 @@ impl Scene for GameScene {
                             }
                         } else {
                             show_message(tl!("ex-speed-invalid", "min" => range.start, "max" => range.end)).error();
+                        }
+                    }
+                }
+                "exercise_judgement" => {
+                    if self.mode == GameMode::Exercise && tm.paused() {
+                        if let Some(value) = crate::practice_view::parse(text.trim().trim_end_matches('%')).filter(|v| (10. ..=300.).contains(v)) {
+                            if self.exercise_judgement_locked || self.exercise_judgement_percent != value {
+                                self.finish_play_report(ReportEndReason::PracticeSettingsChanged, tm.now(), tm.real_time());
+                                self.exercise_judgement_percent = value;
+                                self.exercise_judgement_locked = false;
+                                self.exercise_state_reset_pending = true;
+                                self.sync_note_flow_speed();
+                            }
+                        } else {
+                            show_message("请输入 10 到 300 之间的百分比").error();
                         }
                     }
                 }
@@ -1832,6 +2256,20 @@ impl Scene for GameScene {
         }
 
         self.sync_note_flow_speed();
+        self.res.replay_note_centers.clear();
+        if !self.res.replay_view {
+            self.res.replay_note_targets.clear();
+            if let Some(recorder) = &self.replay {
+                self.res.replay_note_targets.extend(recorder.pending.iter().map(|e| (e.line, e.note)));
+            }
+        }
+        self.res.chart_post_view = self.res.has_noise_area
+            && (self.mode == GameMode::Exercise || self.res.replay_view)
+            && self.res.practice_view != Default::default()
+            && !self
+                .res
+                .practice_view
+                .needs_expanded_view(self.res.camera.viewport.map_or(ui.viewport.2, |vp| vp.2) as f32, self.res.aspect_ratio);
         let res = &mut self.res;
         let asp = ui.viewport.2 as f32 / ui.viewport.3 as f32;
         if res.update_size(ui.viewport) || self.mode == GameMode::View {
@@ -1868,7 +2306,8 @@ impl Scene for GameScene {
         let h = 1. / res.aspect_ratio;
         draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
 
-        let transformed_view = self.mode == GameMode::Exercise && res.practice_view != Default::default();
+        let transformed_view =
+            !res.chart_post_view && (self.mode == GameMode::Exercise || res.replay_view) && res.practice_view != Default::default();
         if transformed_view {
             push_camera_state();
             let (cx, cy) = res.practice_view.center(res.camera.viewport.unwrap().2 as f32);
@@ -1883,11 +2322,11 @@ impl Scene for GameScene {
             self.gl.quad_gl.viewport(chart_target_vp);
         }
 
-        let judgement_ranges = res
-            .config
-            .judgement_range_debug
-            .enabled
-            .then(|| self.judge.judgement_range_profile(&res.config));
+        let noise_projection = self.gl.quad_gl.get_projection_matrix();
+        let judgement_ranges = res.config.judgement_range_debug.enabled.then(|| {
+            self.replay_view_profile
+                .unwrap_or_else(|| self.judge.judgement_range_profile(&res.config))
+        });
         self.chart
             .render(ui, res, judgement_ranges.as_ref().map(|profile| (profile, self.judge.notes.as_slice())));
 
@@ -1902,7 +2341,7 @@ impl Scene for GameScene {
         let t = tm.real_time();
         let dt = (t - std::mem::replace(&mut self.last_update_time, t)) as f32;
         if res.config.particle {
-            res.emitter.draw(if self.auto_flip.rotating() { 0. } else { dt });
+            res.emitter.draw(if res.replay_view || self.auto_flip.rotating() { 0. } else { dt });
         }
         if transformed_view {
             pop_camera_state();
@@ -1915,7 +2354,61 @@ impl Scene for GameScene {
             self.gl.quad_gl.viewport(chart_target_vp);
         }
         if let Some(renderer) = &mut self.noise_renderer {
-            renderer.render(res, &self.chart.extra.block_areas, &self.judge.noise_state, ui.viewport)?;
+            renderer.render(res, &self.chart.extra.block_areas, &self.judge.noise_state, ui.viewport, noise_projection)?;
+        }
+        if res.chart_post_view {
+            // Compose at the original chart camera first. Transform the completed
+            // scene once, using a different target so no pass reads its own output.
+            if let Some(target) = &mut res.chart_target {
+                let token = self.noise_renderer.as_mut().map(|renderer| {
+                    renderer.begin_composite(
+                        res.config.noise_area.low_performance,
+                        res.config.noise_area.precise_edges,
+                        ui.viewport.2 as u32,
+                        ui.viewport.3 as u32,
+                    )
+                });
+                self.gl.flush();
+                target.swap();
+                let source = target.old().texture;
+                source.set_filter(FilterMode::Linear);
+                let output = target.output();
+                let width = res.camera.viewport.unwrap().2 as f32;
+                let (cx, cy) = res.practice_view.composite_target(width, ui.viewport.2 as f32);
+                push_camera_state();
+                set_camera(&Camera2D {
+                    zoom: vec2(1., -asp),
+                    render_target: Some(output),
+                    ..Default::default()
+                });
+                gl_use_default_material();
+                self.gl.quad_gl.scissor(None);
+                clear_background(BLACK);
+                draw_background(*res.background);
+                set_camera(&Camera2D {
+                    target: vec2(cx, cy),
+                    zoom: vec2(1., asp) * res.practice_view.scale(),
+                    render_target: Some(output),
+                    ..Default::default()
+                });
+                draw_texture_ex(
+                    source,
+                    -1.,
+                    -ui.top,
+                    WHITE,
+                    DrawTextureParams {
+                        dest_size: Some(vec2(2., ui.top * 2.)),
+                        ..Default::default()
+                    },
+                );
+                self.gl.flush();
+                pop_camera_state();
+                self.gl.quad_gl.render_pass(Some(output.render_pass));
+                self.gl.quad_gl.viewport(chart_target_vp);
+                if let Some(token) = token {
+                    self.noise_renderer.as_mut().unwrap().end_composite(token);
+                }
+            }
         }
         let rotating_canvas = self.res.rotate_chart;
         if !rotating_canvas {
@@ -1975,7 +2468,7 @@ impl Scene for GameScene {
                                 0.
                             }
                         } else {
-                            self.auto_flip.angle(tm.real_time())
+                            self.replay_view_angle.unwrap_or_else(|| self.auto_flip.angle(tm.real_time()))
                         },
                         ..Default::default()
                     },
@@ -1998,7 +2491,7 @@ impl Scene for GameScene {
             ui.abs_scope(|ui| self.edit_chart_play(ui, tm))?;
             pop_camera_state();
         }
-        if self.mode != GameMode::EditChartPlay && self.res.config.timing_bar.enabled {
+        if self.mode != GameMode::EditChartPlay && !tm.paused() && self.res.config.timing_bar.enabled {
             let saved_viewport = self.gl.quad_gl.get_viewport();
             push_camera_state();
             set_camera(&Camera2D {
@@ -2012,17 +2505,32 @@ impl Scene for GameScene {
                     &self.res.config.timing_bar,
                     &self.timing_bar,
                     &profile,
-                    (self.res.config.judgement_mode == crate::config::JudgementMode::Custom).then(|| self.res.config.custom_judgement.effective()),
+                    (self.res.config.judgement_mode == crate::config::JudgementMode::Custom)
+                        .then(|| self.res.config.effective_custom_judgement())
+                        .as_deref(),
                 )
             });
             pop_camera_state();
             self.gl.quad_gl.viewport(saved_viewport);
         }
+        if !self.res.replay_view {
+            self.capture_replay_frame(tm);
+            if tm.paused() && !self.auto_flip.rotating() {
+                self.finish_practice_replay();
+                if let Some(recorder) = &mut self.replay {
+                    recorder.reset_clock();
+                }
+            }
+        }
+        // Draw after chart compositing/rotation so this control is anchored to
+        // the actual display, independent of chart aspect and practice camera.
+        self.render_pause_replay_control(tm, ui);
         Ok(())
     }
 
     fn next_scene(&mut self, tm: &mut TimeManager) -> NextScene {
         if self.should_exit {
+            self.finish_practice_replay();
             self.finish_play_report(ReportEndReason::Exit, tm.now(), tm.real_time());
             if tm.paused() {
                 tm.resume();
@@ -2061,6 +2569,19 @@ impl Scene for GameScene {
 #[cfg(test)]
 mod exercise_note_flow_tests {
     use super::*;
+
+    #[test]
+    fn pause_replay_control_is_top_right_on_different_displays() {
+        for (w, h) in [(1920, 1080), (2400, 1080), (2048, 1536)] {
+            let top = h as f32 / w as f32;
+            let rect = GameScene::pause_replay_rect(top, true);
+            assert!((rect.right() - 0.96).abs() < 1e-6);
+            assert!((rect.y + top - 0.025).abs() < 1e-6);
+            let raw = vec2((rect.center().x + 1.) * w as f32 / 2., (rect.center().y + top) * w as f32 / 2.);
+            let touch = Judge::screen_touch_position(raw, (0, 0, w, h), h as f32);
+            assert!(rect.contains(touch));
+        }
+    }
 
     #[test]
     fn inverse_lock_is_rounded_to_three_decimals() {

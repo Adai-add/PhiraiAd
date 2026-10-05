@@ -12,3 +12,4 @@ tempfile.workspace = true
 pollster.workspace = true
 prpr.workspace = true
 uuid = { workspace = true, features=["serde"] }
+tracing.workspace = true

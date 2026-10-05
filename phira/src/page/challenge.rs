@@ -1,8 +1,5 @@
 use super::ChartItem;
-use crate::{
-    challenge_ui::BadgePicker,
-    get_data, get_data_mut, save_data,
-};
+use crate::{challenge_ui::BadgePicker, get_data, get_data_mut, save_data};
 use anyhow::Result;
 use macroquad::prelude::*;
 use prpr::ui::{DRectButton, Ui};
@@ -56,9 +53,10 @@ impl ChallengePanel {
             chart.info.difficulty = value as f32;
         }
         if !self.selected.select_unique(chart, |a, b| {
-            a.info.id.zip(b.info.id).is_some_and(|(a, b)| a == b)
-                || a.local_path.as_ref().zip(b.local_path.as_ref()).is_some_and(|(a, b)| a == b)
-        }) { prpr::scene::show_message("不能重复选择同一个谱面").warn(); }
+            a.info.id.zip(b.info.id).is_some_and(|(a, b)| a == b) || a.local_path.as_ref().zip(b.local_path.as_ref()).is_some_and(|(a, b)| a == b)
+        }) {
+            prpr::scene::show_message("不能重复选择同一个谱面").warn();
+        }
     }
     pub fn close(&mut self) -> bool {
         if self.picker.open {
@@ -79,11 +77,15 @@ impl ChallengePanel {
             if let Some(result) = task.take() {
                 if let Ok(chart) = result {
                     if let Some(selected) = &mut self.selected.slots[*slot] {
-                        if selected.info.id == Some(*id) { selected.illu = super::Illustration::from_file_thumbnail(chart.illustration.clone()); }
+                        if selected.info.id == Some(*id) {
+                            selected.illu = super::Illustration::from_file_thumbnail(chart.illustration.clone());
+                        }
                     }
                 }
                 false
-            } else { true }
+            } else {
+                true
+            }
         });
         for chart in self.selected.slots.iter_mut().flatten() {
             chart.illu.settle(t);
@@ -100,7 +102,11 @@ impl ChallengePanel {
         let badge_rect = Rect::new(rect.x + 0.24 + 0.018, rect.y, 0.14, rect.h);
         self.badge.render_text(ui, badge_rect, t, "", 0.4, true);
         if let Some(badge) = get_data().challenge_badges.display() {
-            crate::challenge_ui::render_display_badge(ui, Rect::new(badge_rect.x + 0.004, badge_rect.y + 0.004, badge_rect.w - 0.008, badge_rect.h - 0.008), badge);
+            crate::challenge_ui::render_display_badge(
+                ui,
+                Rect::new(badge_rect.x + 0.004, badge_rect.y + 0.004, badge_rect.w - 0.008, badge_rect.h - 0.008),
+                badge,
+            );
         }
     }
     pub fn touch(&mut self, touch: &Touch, t: f32) -> Result<bool> {
@@ -114,15 +120,36 @@ impl ChallengePanel {
                 self.restoring.clear();
                 for (i, saved) in get_data().challenge_selection.iter().enumerate() {
                     if let Some(saved) = saved {
-                        let exists = saved.local_path.as_ref().is_some_and(|p| std::path::Path::new(&format!("{}/{p}", crate::dir::charts().unwrap_or_default())).exists());
-                        if !exists && saved.info.id.is_none() { continue; }
+                        let exists = saved
+                            .local_path
+                            .as_ref()
+                            .is_some_and(|p| std::path::Path::new(&format!("{}/{p}", crate::dir::charts().unwrap_or_default())).exists());
+                        if !exists && saved.info.id.is_none() {
+                            continue;
+                        }
                         let local_path = if exists { saved.local_path.clone() } else { None };
-                        let illu = local_path.as_ref().map(|p| super::local_illustration(p.clone(), prpr::ext::BLACK_TEXTURE.clone(), false))
+                        let illu = local_path
+                            .as_ref()
+                            .map(|p| super::local_illustration(p.clone(), prpr::ext::BLACK_TEXTURE.clone(), false))
                             .unwrap_or_else(|| super::Illustration::from_done(prpr::ext::BLACK_TEXTURE.clone()));
-                        if self.selected.slots.iter().flatten().any(|old| old.info.id.zip(saved.info.id).is_some_and(|(a,b)| a == b)
-                            || old.local_path.as_ref().zip(local_path.as_ref()).is_some_and(|(a,b)| a == b)) { continue; }
-                        if !exists { if let Some(id) = saved.info.id { self.restoring.push((i, id, prpr::task::Task::new(crate::client::Client::load::<crate::client::Chart>(id)))); } }
-                        self.selected.slots[i] = Some(ChartItem { info: saved.info.clone(), local_path, illu, chart_type: super::ChartType::Imported });
+                        if self.selected.slots.iter().flatten().any(|old| {
+                            old.info.id.zip(saved.info.id).is_some_and(|(a, b)| a == b)
+                                || old.local_path.as_ref().zip(local_path.as_ref()).is_some_and(|(a, b)| a == b)
+                        }) {
+                            continue;
+                        }
+                        if !exists {
+                            if let Some(id) = saved.info.id {
+                                self.restoring
+                                    .push((i, id, prpr::task::Task::new(crate::client::Client::load::<crate::client::Chart>(id))));
+                            }
+                        }
+                        self.selected.slots[i] = Some(ChartItem {
+                            info: saved.info.clone(),
+                            local_path,
+                            illu,
+                            chart_type: super::ChartType::Imported,
+                        });
                     }
                 }
                 self.selected.focused = self.selected.slots.iter().position(Option::is_none).unwrap_or(0);
@@ -138,11 +165,23 @@ impl ChallengePanel {
             self.close();
             return Ok(true);
         }
-        if self.clear.touch(touch, t) { self.restoring.clear(); self.selected = Default::default(); return Ok(true); }
+        if self.clear.touch(touch, t) {
+            self.restoring.clear();
+            self.selected = Default::default();
+            return Ok(true);
+        }
         if self.save_selection.touch(touch, t) {
-            let saved = std::array::from_fn(|i| self.selected.slots[i].as_ref().map(|chart| crate::data::SavedChallengeChart { info: chart.info.clone(), local_path: chart.local_path.clone() }));
+            let saved = std::array::from_fn(|i| {
+                self.selected.slots[i].as_ref().map(|chart| crate::data::SavedChallengeChart {
+                    info: chart.info.clone(),
+                    local_path: chart.local_path.clone(),
+                })
+            });
             let old = std::mem::replace(&mut get_data_mut().challenge_selection, saved);
-            if let Err(error) = save_data() { get_data_mut().challenge_selection = old; return Err(error); }
+            if let Err(error) = save_data() {
+                get_data_mut().challenge_selection = old;
+                return Err(error);
+            }
             prpr::scene::show_message("课题选择已保存").ok();
             return Ok(true);
         }
@@ -169,8 +208,10 @@ impl ChallengePanel {
             self.area = Rect::new(-0.7, y, 1.67, SELECTOR_HEIGHT);
             ui.fill_rect(self.area, Color::from_rgba(22, 29, 41, 255));
             self.cancel.render_text(ui, Rect::new(-0.7, y, 0.22, 0.065), t, "取消", 0.4, false);
-            self.clear.render_text(ui, Rect::new(-0.7, y + 0.085, 0.22, 0.065), t, "清空", 0.35, false);
-            self.save_selection.render_text(ui, Rect::new(-0.7, y + 0.17, 0.22, 0.065), t, "保存选择", 0.32, false);
+            self.clear
+                .render_text(ui, Rect::new(-0.7, y + 0.085, 0.22, 0.065), t, "清空", 0.35, false);
+            self.save_selection
+                .render_text(ui, Rect::new(-0.7, y + 0.17, 0.22, 0.065), t, "保存选择", 0.32, false);
             for i in 0..3 {
                 let x = -0.46 + i as f32 * 0.40;
                 let label = ["1st", "2nd", "3rd"][i];
@@ -186,12 +227,16 @@ impl ChallengePanel {
                         .max_width(0.35)
                         .size(0.3)
                         .draw();
-                    ui.text(format!("{}  {:.1}", crate::challenge::difficulty_label(&chart.info.level, chart.info.difficulty as f64), chart.info.difficulty))
-                        .pos(x + 0.19, cover.bottom() + 0.031)
-                        .anchor(0.5, 0.)
-                        .max_width(0.35)
-                        .size(0.3)
-                        .draw();
+                    ui.text(format!(
+                        "{}  {:.1}",
+                        crate::challenge::difficulty_label(&chart.info.level, chart.info.difficulty as f64),
+                        chart.info.difficulty
+                    ))
+                    .pos(x + 0.19, cover.bottom() + 0.031)
+                    .anchor(0.5, 0.)
+                    .max_width(0.35)
+                    .size(0.3)
+                    .draw();
                 }
             }
             let rect = Rect::new(0.76, y, 0.21, 0.065);

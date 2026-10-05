@@ -147,8 +147,13 @@ impl Model {
                 let s = scale[i].as_f64().context("标准化尺度无效")?;
                 let m = mean[i].as_f64().context("均值无效")?;
                 ensure!(s > 0. && s.is_finite(), "标准化尺度无效");
-                let v = ((x - m) / s) as f32;
-                ensure!(v.is_finite(), "输入超出模型数值范围");
+                ensure!(m.is_finite(), "均值无效");
+                let normalized = (x - m) / s;
+                let v = if normalized.is_finite() {
+                    normalized.clamp(-10_000., 10_000.) as f32
+                } else {
+                    0.
+                };
                 Ok(v)
             })
             .collect()

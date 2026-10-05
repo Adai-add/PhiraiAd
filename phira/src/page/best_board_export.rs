@@ -7,7 +7,13 @@ use prpr::{
     scene::{show_error, show_message},
     ui::Ui,
 };
-use std::{io::Write, sync::mpsc};
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+use std::io::Write;
+use std::sync::mpsc;
+
+#[cfg(target_os = "ios")]
+#[path = "ios_photo_export.rs"]
+mod ios_photo_export;
 
 #[derive(Default)]
 pub struct BestBoardExport {
@@ -171,13 +177,22 @@ fn save_image(pixels: Vec<u8>, width: u32, height: u32) -> Result<String> {
         Ok(path) => return Ok(path),
         Err(error) => return Err(error.context("相册写入失败")),
     }
+    #[cfg(target_os = "ios")]
+    return ios_photo_export::save_png(&filename, &png);
+
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    save_desktop(&filename, &png)
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn save_desktop(filename: &str, png: &[u8]) -> Result<String> {
     let directory = std::path::PathBuf::from(crate::dir::root()?).join("best-boards");
     std::fs::create_dir_all(&directory)?;
     let path = directory.join(filename);
     let temporary = path.with_extension("tmp");
     let result = (|| -> Result<()> {
         let mut file = std::fs::File::create(&temporary)?;
-        file.write_all(&png)?;
+        file.write_all(png)?;
         file.sync_all()?;
         std::fs::rename(&temporary, &path)?;
         Ok(())

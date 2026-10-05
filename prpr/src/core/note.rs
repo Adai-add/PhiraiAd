@@ -10,7 +10,7 @@ pub(crate) const HOLD_PARTICLE_INTERVAL: f64 = 0.15;
 const FADEOUT_TIME: f64 = 0.16;
 const BAD_TIME: f64 = 0.5;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum NoteKind {
     Click,
     Hold { end_time: f64, end_height: f64 },
@@ -237,6 +237,51 @@ impl Note {
             self.kind.clone()
         };
         self.render_with_kind(kind, res, config, bpm_list);
+    }
+
+    pub(crate) fn capture_replay_center(&self, res: &mut Resource, config: &mut RenderConfig, tag: (u32, u32)) {
+        // Sample the same transforms used by drawing, even on the hit frame
+        // after judgement has hidden the sprite. Store viewport-normalized NDC.
+        {
+            self.init_ctrl_obj(config.ctrl_obj, config.line_height);
+            let spd = self.speed * config.ctrl_obj.y.now_opt().unwrap_or(1.) as f64;
+            let base = (self.height - config.line_height) / res.aspect_ratio as f64 * spd;
+            let (transform, local) = if matches!(self.kind, NoteKind::Hold { .. }) {
+                let style = if res.config.double_hint && self.multiple_hint {
+                    &res.res_pack.note_style_mh
+                } else {
+                    &res.res_pack.note_style
+                };
+                let scale = res.note_width
+                    * if res.config.double_hint && self.multiple_hint {
+                        res.res_pack.note_style_mh.click.width() / res.res_pack.note_style.click.width()
+                    } else {
+                        1.
+                    };
+                let r = style.hold_head_rect();
+                let half_height = r.h / r.w * scale * style.hold_ratio();
+                let bottom = if self.time <= res.time { 0. } else { base as f32 * res.note_flow_speed };
+                (
+                    self.now_transform(res, config.ctrl_obj, 0., 0.),
+                    Point::new(0., bottom - if res.res_pack.info.hold_compact { 0. } else { half_height }),
+                )
+            } else {
+                (self.now_transform(res, config.ctrl_obj, base as f32, config.incline_sin), Point::default())
+            };
+            let p = res.world_to_screen(transform.transform_point(&local));
+            // Chart::render applies this reflection in the GL model stack.
+            let projection = unsafe { get_internal_gl() }.quad_gl.get_projection_matrix();
+            let clip = projection * vec4(if res.config.flip_x() { -p.x } else { p.x }, -p.y, 0., 1.);
+            if clip.w.abs() > 1e-6 && clip.is_finite() {
+                let mut center = [clip.x / clip.w, clip.y / clip.w];
+                if res.chart_post_view {
+                    let width = res.camera.viewport.map_or(res.last_vp.2, |vp| vp.2).max(1) as f32;
+                    let (x, y) = res.practice_view.chart_to_screen(center[0], -center[1] / res.aspect_ratio, width);
+                    center = [x, -y * res.aspect_ratio];
+                }
+                res.replay_note_centers.insert(tag, center);
+            }
+        }
     }
 
     fn render_with_kind(&self, kind: NoteKind, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {

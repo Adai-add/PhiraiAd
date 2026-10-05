@@ -161,6 +161,8 @@ pub(crate) struct Frame<'a> {
     pub held_positions: &'a [Vec<[f64; 2]>],
     pub keyboard_clicks: u32,
     pub keyboard_held: bool,
+    pub fullscreen: bool,
+    pub interval_multiplier: f64,
 }
 
 pub(crate) enum Event {
@@ -243,17 +245,23 @@ impl Judge {
             if dt >= best_abs_dt + CANDIDATE_EPSILON {
                 continue;
             }
-            let Some([x, y]) = finger.positions.get(note.line_id).copied().flatten() else {
+            let Some([x, y]) = finger
+                .positions
+                .get(note.line_id)
+                .copied()
+                .flatten()
+                .or_else(|| frame.fullscreen.then_some([note.x, 0.]))
+            else {
                 continue;
             };
-            let dx = (note.x - x).abs();
+            let dx = if frame.fullscreen { 0. } else { (note.x - x).abs() };
             if dx >= width {
                 continue;
             }
             if !flick && dt > windows.bad - (dx - 0.9).max(0.) * windows.perfect * 0.5 {
                 continue;
             }
-            let metric = dx + (y / 2.2).abs();
+            let metric = if frame.fullscreen { 0. } else { dx + (y / 2.2).abs() };
             if let Some(best_index) = best {
                 let previous = &self.notes[best_index];
                 if flick || matches!(previous.kind, Kind::Tap | Kind::Hold) {
@@ -322,7 +330,7 @@ impl Judge {
                     || frame
                         .held_positions
                         .get(note.line_id)
-                        .is_some_and(|positions| positions.iter().any(|p| (note.x - p[0]).abs() < width))
+                        .is_some_and(|positions| positions.iter().any(|p| frame.fullscreen || (note.x - p[0]).abs() < width))
             };
             let mut outcome = None;
             let mut hit_time = None;
@@ -375,10 +383,13 @@ impl Judge {
                 }
                 Kind::Drag => {
                     // A CheckNote click never arms DragControl.
-                    if !state.matched && custom.map_or(dt.abs() <= DRAG_WINDOW, |(early, miss)| dt <= early && dt > miss) && present(2.1) {
+                    if !state.matched
+                        && custom.map_or(dt.abs() <= DRAG_WINDOW * frame.interval_multiplier, |(early, miss)| dt <= early && dt > miss)
+                        && present(2.1)
+                    {
                         state.matched = true;
                     }
-                    if !state.matched && custom.map_or(dt < -DRAG_WINDOW, |(_, miss)| dt <= miss) {
+                    if !state.matched && custom.map_or(dt < -DRAG_WINDOW * frame.interval_multiplier, |(_, miss)| dt <= miss) {
                         outcome = Some(Outcome::Miss);
                     } else if state.matched && dt < RESOLVE_EARLY {
                         outcome = Some(Outcome::Perfect);
@@ -487,9 +498,85 @@ mod tests {
             held_positions,
             keyboard_clicks: 0,
             keyboard_held: false,
+            fullscreen: false,
+            interval_multiplier: 1.,
         }
     }
 
+    #[test]
+    fn fullscreen_tap_removes_position_limit_without_expanding_timing() {
+        let fingers = [finger(true, false, 100.)];
+        let judge = Judge::new(vec![note(Kind::Tap, 0.)]);
+        assert!(judge.candidate(&frame(0., &fingers, &[]), &fingers[0], false, None).is_none());
+        let mut f = frame(0., &fingers, &[]);
+        f.fullscreen = true;
+        let mut judge = Judge::new(vec![note(Kind::Tap, 0.)]);
+        assert_eq!(outcomes(judge.step(f)), vec![Outcome::Perfect]);
+        let mut f = frame(-1., &fingers, &[]);
+        f.fullscreen = true;
+        assert!(outcomes(Judge::new(vec![note(Kind::Tap, 0.)]).step(f)).is_empty());
+    }
+    #[test]
+    fn fullscreen_hold_requires_real_contact_and_flick_requires_gesture() {
+        let fingers = [finger(true, false, 100.)];
+        let held = [vec![[100., 100.]]];
+        let mut judge = Judge::new(vec![note(Kind::Hold, 0.)]);
+        let mut f = frame(0., &fingers, &held);
+        f.fullscreen = true;
+        judge.step(f);
+        assert!(judge.notes[0].state.head.is_some());
+        let mut f = frame(0.5, &[], &held);
+        f.fullscreen = true;
+        assert!(outcomes(judge.step(f)).is_empty());
+        for i in 1..=5 {
+            let mut f = frame(0.5 + i as f64 * 0.01, &[], &[]);
+            f.fullscreen = true;
+            judge.step(f);
+        }
+        assert_eq!(judge.notes[0].state.outcome, Some(Outcome::Miss));
+        let mut judge = Judge::new(vec![note(Kind::Flick, 0.)]);
+        let mut f = frame(0., &fingers, &held);
+        f.fullscreen = true;
+        judge.step(f);
+        assert!(!judge.notes[0].state.matched);
+        let swipe = [finger(false, true, 100.)];
+        let mut f = frame(0., &swipe, &held);
+        f.fullscreen = true;
+        assert_eq!(outcomes(judge.step(f)), vec![Outcome::Perfect]);
+    }
+    #[test]
+    fn fullscreen_drag_requires_contact_and_one_click_does_not_hit_a_chord() {
+        let mut judge = Judge::new(vec![note(Kind::Drag, 0.)]);
+        let mut f = frame(0., &[], &[]);
+        f.fullscreen = true;
+        assert!(outcomes(judge.step(f)).is_empty());
+        let held = [vec![[100., 100.]]];
+        let mut f = frame(0., &[], &held);
+        f.fullscreen = true;
+        assert_eq!(outcomes(judge.step(f)), vec![Outcome::Perfect]);
+        let fingers = [finger(true, false, 100.)];
+        let mut f = frame(0., &fingers, &held);
+        f.fullscreen = true;
+        let mut second = note(Kind::Tap, 0.);
+        second.note_id = 1;
+        assert_eq!(outcomes(Judge::new(vec![note(Kind::Tap, 0.), second]).step(f)).len(), 1);
+    }
+    #[test]
+    fn fullscreen_custom_gestures_keep_custom_miss_and_early_limits() {
+        let swipe = [finger(false, true, 100.)];
+        let mut judge = Judge::new(vec![note(Kind::Flick, 0.)]);
+        let mut f = frame(-0.15, &swipe, &[]);
+        f.fullscreen = true;
+        judge.step_custom_gestures(f, 0.1, -0.1);
+        assert!(!judge.notes[0].state.matched);
+        let mut f = frame(0., &swipe, &[]);
+        f.fullscreen = true;
+        assert_eq!(outcomes(judge.step_custom_gestures(f, 0.1, -0.1)), vec![Outcome::Perfect]);
+        let mut judge = Judge::new(vec![note(Kind::Flick, 0.)]);
+        let mut f = frame(0.11, &swipe, &[]);
+        f.fullscreen = true;
+        assert_eq!(outcomes(judge.step_custom_gestures(f, 0.1, -0.1)), vec![Outcome::Miss]);
+    }
     fn outcomes(result: Result) -> Vec<Outcome> {
         result
             .events
@@ -521,6 +608,24 @@ mod tests {
         judge.step(frame(-0.1, &[], &[vec![[0., 0.]]]));
         assert!(judge.notes[0].state.matched);
         assert_eq!(outcomes(judge.step(frame(0., &[], &[]))), vec![Outcome::Perfect]);
+    }
+
+    #[test]
+    fn practice_drag_interval_changes_matching_and_miss_time() {
+        let mut judge = Judge::new(vec![note(Kind::Drag, 0.)]);
+        let held = [vec![[0., 0.]]];
+        let mut f = frame(-0.25, &[], &held);
+        f.interval_multiplier = 3.;
+        judge.step(f);
+        assert!(judge.notes[0].state.matched);
+        assert_eq!(outcomes(judge.step(frame(0., &[], &[]))), vec![Outcome::Perfect]);
+        let mut judge = Judge::new(vec![note(Kind::Drag, 0.)]);
+        let mut f = frame(0.20, &[], &[]);
+        f.interval_multiplier = 3.;
+        assert!(outcomes(judge.step(f)).is_empty());
+        let mut f = frame(0.31, &[], &[]);
+        f.interval_multiplier = 3.;
+        assert_eq!(outcomes(judge.step(f)), vec![Outcome::Miss]);
     }
 
     #[test]

@@ -156,7 +156,10 @@ mod ios_diagnostics {
         fs::OpenOptions,
         io::Write,
         path::PathBuf,
-        sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Mutex, Once, OnceLock},
+        sync::{
+            atomic::{AtomicBool, AtomicU64, Ordering},
+            Mutex, Once, OnceLock,
+        },
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -231,7 +234,9 @@ mod ios_diagnostics {
                 let _ = writeln!(file, "{message}");
                 // Each write reaches the kernel when the file is closed. Force
                 // disk sync for errors/panic, not every early-frame breadcrumb.
-                if durable { let _ = file.sync_data(); }
+                if durable {
+                    let _ = file.sync_data();
+                }
             }
         }
     }
@@ -246,7 +251,9 @@ mod ios_diagnostics {
         // Bound individual errors without splitting UTF-8.
         if message.len() > 2048 {
             let mut end = 2048;
-            while !message.is_char_boundary(end) { end -= 1; }
+            while !message.is_char_boundary(end) {
+                end -= 1;
+            }
             message.truncate(end);
         }
         if let Ok(mut history) = HISTORY.try_lock() {
@@ -257,7 +264,9 @@ mod ios_diagnostics {
             let snapshot = history.lines.iter().map(String::as_str).collect::<Vec<_>>().join("\n");
             history.buffer[..snapshot.len()].copy_from_slice(snapshot.as_bytes());
             history.buffer[snapshot.len()] = 0;
-            PHIRAIAD_CRASH_ANNOTATIONS.message2.store(history.buffer.as_ptr() as u64, Ordering::Release);
+            PHIRAIAD_CRASH_ANNOTATIONS
+                .message2
+                .store(history.buffer.as_ptr() as u64, Ordering::Release);
         }
         append_file(&message, durable);
     }
@@ -285,10 +294,15 @@ mod ios_diagnostics {
                 let is_main = unsafe { pthread_main_np() } != 0;
                 let first = if is_main { &FIRST_MAIN_PANIC } else { &FIRST_BACKGROUND_PANIC };
                 if !first.swap(true, Ordering::AcqRel) {
-                    let reason = info.payload().downcast_ref::<String>().map(String::as_str)
+                    let reason = info
+                        .payload()
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
                         .or_else(|| info.payload().downcast_ref::<&str>().copied())
                         .unwrap_or("non-string panic payload");
-                    let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                    let location = info
+                        .location()
+                        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
                         .unwrap_or_else(|| "unknown location".to_owned());
                     let thread = if is_main { "main" } else { "background" };
                     let message = format!("PHIRAIAD_FIRST_RUST_PANIC thread={thread} at {location}: {reason}").replace('\0', "?");
@@ -299,7 +313,9 @@ mod ios_diagnostics {
                         if is_main {
                             PHIRAIAD_CRASH_ANNOTATIONS.message.store(pointer, Ordering::Release);
                         } else {
-                            let _ = PHIRAIAD_CRASH_ANNOTATIONS.message.compare_exchange(0, pointer, Ordering::AcqRel, Ordering::Acquire);
+                            let _ = PHIRAIAD_CRASH_ANNOTATIONS
+                                .message
+                                .compare_exchange(0, pointer, Ordering::AcqRel, Ordering::Acquire);
                         }
                     }
                     stderr(&message);

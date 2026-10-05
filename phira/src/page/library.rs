@@ -94,6 +94,7 @@ pub struct LibraryPage {
     rks: super::rks::RksPanel,
     best_board: super::best_board::BestBoard,
     best_board_export: super::best_board_export::BestBoardExport,
+    bn_import: crate::bn_import::Panel,
     challenge: super::challenge::ChallengePanel,
     challenge_scene: Option<NextScene>,
 
@@ -180,6 +181,7 @@ impl LibraryPage {
             rks: super::rks::RksPanel::new()?,
             best_board: super::best_board::BestBoard::new(),
             best_board_export: Default::default(),
+            bn_import: Default::default(),
             challenge: super::challenge::ChallengePanel::new(),
             challenge_scene: None,
             tabs: Tabs::new([
@@ -712,6 +714,10 @@ impl Page for LibraryPage {
 
     fn touch(&mut self, touch: &Touch, s: &mut SharedState) -> Result<bool> {
         let t = s.t;
+        if self.bn_import.open {
+            self.bn_import.touch(touch, t);
+            return Ok(true);
+        }
         if self.best_board_export.busy() {
             return Ok(true);
         }
@@ -922,6 +928,29 @@ impl Page for LibraryPage {
 
     fn update(&mut self, s: &mut SharedState) -> Result<()> {
         self.rks.poll_ai();
+        let catalog = if crate::bn_import::needs_catalog() {
+            s.charts_local
+                .iter()
+                .filter_map(|c| {
+                    let path = c.local_path.as_ref()?;
+                    let constant = self.rks.resolved.get(path).and_then(|r| r.difficulty).unwrap_or(c.info.difficulty as f64);
+                    Some(crate::bn_image::ChartCandidate {
+                        path: path.clone(),
+                        id: c.info.id,
+                        level: c.info.level.clone(),
+                        name: c.info.name.clone(),
+                        constant,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.bn_import.update(catalog, s.t);
+        if std::mem::take(&mut self.bn_import.changed) {
+            self.best_board.close();
+            self.sync_local(s);
+        }
         self.best_board.update(s.t);
         self.best_board_export.update();
         self.challenge.update(s.t);
@@ -1062,7 +1091,11 @@ impl Page for LibraryPage {
             self.sync_local(s);
         }
         if let Some((id, text)) = take_input() {
-            if id.starts_with("rks:") {
+            if id.starts_with("bn-import:") {
+                if let Err(err) = self.bn_import.input(&id, text) {
+                    show_error(err);
+                }
+            } else if id.starts_with("rks:") {
                 if let Err(err) = self.rks.input(&id, text) {
                     show_error(err);
                 }
@@ -1499,6 +1532,10 @@ impl Page for LibraryPage {
     }
 
     fn render(&mut self, ui: &mut Ui, s: &mut SharedState) -> Result<()> {
+        if self.bn_import.open {
+            ui.abs_scope(|ui| self.bn_import.render(ui, s.t));
+            return Ok(());
+        }
         self.check_fav_page(s);
         self.rks.begin_render();
         self.best_board.entry_active = false;
@@ -1753,6 +1790,7 @@ impl Page for LibraryPage {
         self.challenge.render(ui, t, challenge_enabled);
         self.best_board.render(ui, t);
         self.best_board_export.render(&mut self.best_board, ui, t);
+
         if self.sync_fav_task.is_some() {
             ui.full_loading_simple(t);
         }
@@ -1776,6 +1814,9 @@ impl Page for LibraryPage {
     }
 
     fn on_back_pressed(&mut self, _s: &mut SharedState) -> bool {
+        if self.bn_import.close() {
+            return true;
+        }
         if self.best_board_export.cancel() {
             return true;
         }

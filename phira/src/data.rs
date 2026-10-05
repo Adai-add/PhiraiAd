@@ -154,8 +154,7 @@ impl Data {
         fn persist_retry_state(data: &Data) {
             let res = (|| -> Result<()> {
                 let root = dir::root().with_context(|| "failed to get root directory")?;
-                let path = format!("{}/data.json", root);
-                std::fs::write(&path, serde_json::to_string(data)?).with_context(|| format!("failed to write to {}", path))?;
+                crate::data_guard::save(Path::new(&root), data)?;
                 Ok(())
             })();
             if let Err(err) = res {
@@ -315,9 +314,7 @@ impl Data {
             )?;
             self.collection_uuids.insert(0, uuid);
         }
-        let charts = dir::charts()?;
-        self.local_records
-            .retain(|local_path, _| Path::new(&format!("{charts}/{local_path}")).exists());
+        // Missing charts can be temporary or moved; never discard their saved scores.
 
         self.config.init();
         PREFER_REDUCED_MOTION.store(self.prefer_reduced_motion, Ordering::Relaxed);

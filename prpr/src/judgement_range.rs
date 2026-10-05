@@ -164,6 +164,37 @@ impl DrawContext<'_> {
     }
 }
 
+/// Exact signed segments, including asymmetric or entirely early/late presets.
+/// Normal/Cool share the Good visibility control; Hold heads never include Bad.
+fn custom_segments(
+    scheme: &crate::custom_judgement::Scheme,
+    hold: bool,
+    perfect: bool,
+    good: bool,
+    bad: bool,
+) -> impl Iterator<Item = (f64, f64, Color)> + '_ {
+    scheme
+        .bands
+        .iter()
+        .enumerate()
+        .take(scheme.bands.len() - 1)
+        .filter_map(move |(stage, band)| {
+            let enabled = match scheme.outcome(stage) {
+                crate::judge::Judgement::Perfect => perfect,
+                crate::judge::Judgement::Good => good,
+                crate::judge::Judgement::Bad => bad && !hold,
+                crate::judge::Judgement::Miss => false,
+            };
+            enabled.then(|| {
+                (
+                    -scheme.boundaries_ms[stage] / 1000.,
+                    -scheme.boundaries_ms[stage + 1] / 1000.,
+                    Color::from_rgba(band.color[0], band.color[1], band.color[2], 255),
+                )
+            })
+        })
+}
+
 fn render_note_ranges(note: &Note, line: &JudgeLine, res: &Resource, profile: &JudgementRangeProfile, anchor: Anchor) {
     if note.fake || matches!(note.judge, JudgeStatus::Judged | JudgeStatus::PreJudge) {
         return;
@@ -194,54 +225,81 @@ fn render_note_ranges(note: &Note, line: &JudgeLine, res: &Resource, profile: &J
             half_width: current_note_half_width(note, line, &ctrl, res, x_limit),
             anchor,
         };
-        match note.kind {
-            NoteKind::Click if cfg.tap.enabled => {
-                if cfg.tap.perfect {
-                    ctx.draw_window_fill(profile.tap_perfect, PERFECT_COLOR, alpha, speed);
+        let custom_head =
+            res.config.judgement_mode == crate::config::JudgementMode::Custom && matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. });
+        if custom_head {
+            let hold = matches!(note.kind, NoteKind::Hold { .. });
+            let (enabled, perfect, good, bad, miss) = if hold {
+                (cfg.hold.enabled, cfg.hold.head_perfect, cfg.hold.head_good, false, cfg.hold.head_miss)
+            } else {
+                (cfg.tap.enabled, cfg.tap.perfect, cfg.tap.good, cfg.tap.bad, cfg.tap.miss)
+            };
+            if enabled {
+                let scheme = res.config.effective_custom_judgement();
+                for (start, end, color) in custom_segments(&scheme, hold, perfect, good, bad) {
+                    let (start, end) = (note.time + start * speed, note.time + end * speed);
+                    ctx.draw_segment(start, end, color, alpha);
+                    let r = ctx.rect_for_times(start, end);
+                    draw_rectangle_lines(r.x, r.y, r.w, r.h, OUTLINE_WIDTH, color);
                 }
-                if cfg.tap.good {
-                    ctx.draw_difference_fill(profile.tap_good, profile.tap_perfect, GOOD_COLOR, alpha, speed);
-                }
-                if cfg.tap.bad {
-                    ctx.draw_difference_fill(profile.tap_outer, profile.tap_good, BAD_COLOR, alpha, speed);
-                }
-                if cfg.tap.perfect {
-                    ctx.draw_outline(profile.tap_perfect, PERFECT_COLOR, speed);
-                }
-                if cfg.tap.good {
-                    ctx.draw_outline(profile.tap_good, GOOD_COLOR, speed);
-                }
-                if cfg.tap.miss {
-                    ctx.draw_outline(profile.tap_outer, MISS_COLOR, speed);
-                } else if cfg.tap.bad {
-                    ctx.draw_outline(profile.tap_outer, BAD_COLOR, speed);
-                }
-            }
-            NoteKind::Hold { .. } if cfg.hold.enabled => {
-                if cfg.hold.head_perfect {
-                    ctx.draw_window_fill(profile.hold_perfect, PERFECT_COLOR, alpha, speed);
-                }
-                if cfg.hold.head_good {
-                    ctx.draw_difference_fill(profile.hold_outer, profile.hold_perfect, GOOD_COLOR, alpha, speed);
-                }
-                if cfg.hold.head_perfect {
-                    ctx.draw_outline(profile.hold_perfect, PERFECT_COLOR, speed);
-                }
-                if cfg.hold.head_miss {
-                    ctx.draw_outline(profile.hold_outer, MISS_COLOR, speed);
-                } else if cfg.hold.head_good {
-                    ctx.draw_outline(profile.hold_outer, GOOD_COLOR, speed);
+                if miss {
+                    // Miss is unbounded; outline only its entry threshold.
+                    let at = note.time - scheme.boundaries_ms.last().unwrap() / 1000. * speed;
+                    let r = ctx.rect_for_times(at, at);
+                    let c = scheme.bands.last().unwrap().color;
+                    draw_rectangle_lines(r.x, r.y, r.w, r.h, OUTLINE_WIDTH, Color::from_rgba(c[0], c[1], c[2], 255));
                 }
             }
-            NoteKind::Drag if cfg.drag => {
-                ctx.draw_window_fill(profile.drag_outer, DRAG_COLOR, alpha, speed);
-                ctx.draw_outline(profile.drag_outer, DRAG_COLOR, speed);
+        } else {
+            match note.kind {
+                NoteKind::Click if cfg.tap.enabled => {
+                    if cfg.tap.perfect {
+                        ctx.draw_window_fill(profile.tap_perfect, PERFECT_COLOR, alpha, speed);
+                    }
+                    if cfg.tap.good {
+                        ctx.draw_difference_fill(profile.tap_good, profile.tap_perfect, GOOD_COLOR, alpha, speed);
+                    }
+                    if cfg.tap.bad {
+                        ctx.draw_difference_fill(profile.tap_outer, profile.tap_good, BAD_COLOR, alpha, speed);
+                    }
+                    if cfg.tap.perfect {
+                        ctx.draw_outline(profile.tap_perfect, PERFECT_COLOR, speed);
+                    }
+                    if cfg.tap.good {
+                        ctx.draw_outline(profile.tap_good, GOOD_COLOR, speed);
+                    }
+                    if cfg.tap.miss {
+                        ctx.draw_outline(profile.tap_outer, MISS_COLOR, speed);
+                    } else if cfg.tap.bad {
+                        ctx.draw_outline(profile.tap_outer, BAD_COLOR, speed);
+                    }
+                }
+                NoteKind::Hold { .. } if cfg.hold.enabled => {
+                    if cfg.hold.head_perfect {
+                        ctx.draw_window_fill(profile.hold_perfect, PERFECT_COLOR, alpha, speed);
+                    }
+                    if cfg.hold.head_good {
+                        ctx.draw_difference_fill(profile.hold_outer, profile.hold_perfect, GOOD_COLOR, alpha, speed);
+                    }
+                    if cfg.hold.head_perfect {
+                        ctx.draw_outline(profile.hold_perfect, PERFECT_COLOR, speed);
+                    }
+                    if cfg.hold.head_miss {
+                        ctx.draw_outline(profile.hold_outer, MISS_COLOR, speed);
+                    } else if cfg.hold.head_good {
+                        ctx.draw_outline(profile.hold_outer, GOOD_COLOR, speed);
+                    }
+                }
+                NoteKind::Drag if cfg.drag => {
+                    ctx.draw_window_fill(profile.drag_outer, DRAG_COLOR, alpha, speed);
+                    ctx.draw_outline(profile.drag_outer, DRAG_COLOR, speed);
+                }
+                NoteKind::Flick if cfg.flick => {
+                    ctx.draw_window_fill(profile.flick_outer, FLICK_COLOR, alpha, speed);
+                    ctx.draw_outline(profile.flick_outer, FLICK_COLOR, speed);
+                }
+                _ => {}
             }
-            NoteKind::Flick if cfg.flick => {
-                ctx.draw_window_fill(profile.flick_outer, FLICK_COLOR, alpha, speed);
-                ctx.draw_outline(profile.flick_outer, FLICK_COLOR, speed);
-            }
-            _ => {}
         }
     }
 
@@ -339,5 +397,35 @@ mod tests {
         assert!(outer.early >= inner.early);
         assert!(outer.late >= inner.late);
         assert!(inner.early <= outer.early && inner.late <= outer.late);
+    }
+}
+
+#[cfg(test)]
+mod custom_range_tests {
+    use super::*;
+    #[test]
+    fn normal_and_cool_follow_good_and_hold_excludes_bad() {
+        let s = crate::custom_judgement::Scheme::new(9);
+        assert_eq!(custom_segments(&s, false, false, true, false).count(), 6);
+        assert_eq!(custom_segments(&s, false, true, false, true).count(), 2);
+        assert_eq!(custom_segments(&s, true, true, false, true).count(), 1);
+        let all: Vec<_> = custom_segments(&s, false, true, true, true).collect();
+        assert_eq!(all.len(), 8);
+        assert_eq!(all[0].0, -0.18);
+        assert_eq!(all.last().unwrap().1, 0.165);
+        for pair in all.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0);
+        }
+        for (i, (_, _, color)) in all.iter().enumerate() {
+            assert_eq!(*color, Color::from_rgba(s.bands[i].color[0], s.bands[i].color[1], s.bands[i].color[2], 255));
+        }
+    }
+    #[test]
+    fn intervals_follow_nonstandard_signed_thresholds_without_assuming_symmetry() {
+        let mut s = crate::custom_judgement::Scheme::new(5);
+        s.boundaries_ms = vec![300., 200., 100., 50., -20.];
+        let v: Vec<_> = custom_segments(&s, false, true, true, true).collect();
+        assert_eq!((v[2].0, v[2].1), (-0.1, -0.05));
+        assert_eq!((v[3].0, v[3].1), (-0.05, 0.02));
     }
 }

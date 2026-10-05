@@ -1,6 +1,6 @@
 pub mod coll;
-pub mod timing_editor;
 mod custom_judgement;
+pub mod timing_editor;
 pub use coll::CollectionPage;
 
 mod event;
@@ -10,6 +10,7 @@ pub mod favorites;
 pub use favorites::FavoritesPage;
 
 mod home;
+mod replay;
 pub use home::HomePage;
 
 mod best_board;
@@ -377,7 +378,7 @@ impl Fader {
                     + 0.012;
             }
             if s == "PhiraiAd" {
-                ui.text("v1.2.1")
+                ui.text("v1.3.0")
                     .pos(x + 0.01, tp + h - 0.027)
                     .anchor(0., 1.)
                     .color(semi_white(0.4))
@@ -472,6 +473,7 @@ fn load_font_with_cksum(data: Vec<u8>) -> Result<(FontArc, String)> {
 }
 
 fn set_bold_font((font, cksum): (FontArc, String)) {
+    crate::custom_font::set_default_bold(font.clone());
     BOLD_FONT.with(move |it| *it.borrow_mut() = Some(TextPainter::new(font, FALLBACK.with(|it| it.borrow().clone()))));
     BOLD_FONT_CKSUM.with(move |it| *it.borrow_mut() = Some(cksum));
 }

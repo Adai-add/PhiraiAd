@@ -730,6 +730,22 @@ impl<'a> Ui<'a> {
         self.touches = touches;
     }
 
+    /// Screen-space overlay input must not inherit a chart/offscreen viewport.
+    /// Keep only events still allowed by SceneManager (dialogs may consume them).
+    pub(crate) fn screen_touch_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.ensure_touches();
+        let original = self.touches.take().unwrap();
+        self.touches = Some(
+            Judge::replay_touches(self.viewport)
+                .into_iter()
+                .filter(|touch| original.iter().any(|allowed| allowed.id == touch.id && allowed.phase == touch.phase))
+                .collect(),
+        );
+        let result = f(self);
+        self.touches = Some(original);
+        result
+    }
+
     pub fn builder<T: IntoShading>(&self, shading: T) -> VertexBuilder<T::Target> {
         VertexBuilder::new(self.transform, shading.into_shading(), self.alpha)
     }
@@ -988,6 +1004,10 @@ impl<'a> Ui<'a> {
     }
 
     pub fn button(&mut self, id: &str, rect: Rect, text: impl Into<String>) -> bool {
+        self.button_with_size(id, rect, text, 0.42)
+    }
+
+    pub fn button_with_size(&mut self, id: &str, rect: Rect, text: impl Into<String>, size: f32) -> bool {
         let text = text.into();
         STATE.with(|state| {
             let mut state = state.borrow_mut();
@@ -1004,7 +1024,7 @@ impl<'a> Ui<'a> {
                 .pos(ct.x, ct.y)
                 .anchor(0.5, 0.5)
                 .max_width(rect.w)
-                .size(0.42)
+                .size(size)
                 .color(WHITE)
                 .no_baseline()
                 .draw();
@@ -1014,9 +1034,15 @@ impl<'a> Ui<'a> {
 
     pub fn checkbox(&mut self, text: impl Into<String>, value: &mut bool) -> Rect {
         let text = text.into();
+        self.checkbox_with_id(&text, text.clone(), value)
+    }
+
+    /// Distinct interaction state for controls with identical visible labels.
+    pub fn checkbox_with_id(&mut self, id: &str, text: impl Into<String>, value: &mut bool) -> Rect {
+        let text = text.into();
         STATE.with(|state| {
             let mut state = state.borrow_mut();
-            let entry = state.entry(format!("chkbox#{text}")).or_default();
+            let entry = state.entry(format!("chkbox#{id}")).or_default();
             let w = 0.08;
             let s = 0.025;
             let text = self.text(text).pos(w, 0.).size(0.47).no_baseline().draw();

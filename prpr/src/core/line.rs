@@ -402,6 +402,26 @@ impl JudgeLine {
                     _ => {}
                 }
             }
+            // The normal render cache drops judged Tap/Flick/Drag notes before
+            // drawing. Sample requested centers independently so the trigger frame
+            // still records its exact position, even after the sprite disappeared.
+            let replay_targets: Vec<_> = res
+                .replay_note_targets
+                .iter()
+                .filter_map(|&(line, note)| (line == id as u32).then_some(note))
+                .collect();
+            for note_id in replay_targets {
+                if let Some(note) = self.notes.get(note_id as usize) {
+                    let tag = (id as u32, note_id);
+                    if note.above {
+                        note.capture_replay_center(res, &mut config, tag);
+                    } else {
+                        res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.)), |res| {
+                            note.capture_replay_center(res, &mut config, tag);
+                        });
+                    }
+                }
+            }
             let (vw, vh) = (1.1, 1.);
             let p = [
                 res.screen_to_world(res.chart_view_point(Point::new(-vw, -vh), true)),

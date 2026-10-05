@@ -16,7 +16,7 @@ use sasa::{AudioClip, AudioManager, Sfx};
 use serde::Deserialize;
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::DerefMut,
     path::Path,
     sync::atomic::AtomicU32,
@@ -405,6 +405,14 @@ impl NoteBuffer {
 pub type SfxMap = HashMap<String, Sfx>;
 
 pub struct Resource {
+    pub replay_capture: bool,
+    pub replay_view: bool,
+    pub chart_post_view: bool,
+    pub replay_note_targets: HashSet<(u32, u32)>,
+    pub replay_note_centers: HashMap<(u32, u32), [f32; 2]>,
+    pub replay_fx: Vec<crate::replay::Fx>,
+    pub replay_sounds: Vec<crate::judge::HitSound>,
+    pub replay_pack_assets: crate::replay::Assets,
     pub config: Config,
     pub info: ChartInfo,
     pub aspect_ratio: f32,
@@ -507,9 +515,14 @@ impl Resource {
                 SafeTexture::from(Texture2D::from_image(&load_image($path).await?))
             };
         }
-        let res_pack = ResourcePack::from_path(config.res_pack_path.as_ref())
-            .await
-            .context("Failed to load resource pack")?;
+        let pack_fs: Box<dyn FileSystem> = if let Some(path) = &config.res_pack_path {
+            crate::fs::fs_from_file(Path::new(path))?
+        } else {
+            crate::fs::fs_from_assets("respack/")?
+        };
+        let mut pack_fs = crate::replay::CaptureFs::new(pack_fs).with_enabled(config.replay_recording_enabled);
+        let replay_pack_assets = pack_fs.assets.clone();
+        let res_pack = ResourcePack::load(&mut pack_fs).await.context("Failed to load resource pack")?;
         let camera = Camera2D {
             target: vec2(0., 0.),
             zoom: vec2(1., -config.aspect_ratio.unwrap_or(info.aspect_ratio)),
@@ -535,6 +548,14 @@ impl Resource {
 
         macroquad::window::gl_set_drawcall_buffer_capacity(MAX_SIZE * 4, MAX_SIZE * 6);
         Ok(Self {
+            replay_capture: false,
+            replay_view: false,
+            chart_post_view: false,
+            replay_note_centers: HashMap::new(),
+            replay_note_targets: HashSet::new(),
+            replay_fx: Vec::new(),
+            replay_sounds: Vec::new(),
+            replay_pack_assets,
             config,
             info,
             aspect_ratio,
@@ -593,7 +614,7 @@ impl Resource {
             self.emit_at_origin(rotation, fallback);
             return;
         };
-        let scheme = self.config.custom_judgement.effective();
+        let scheme = self.config.effective_custom_judgement();
         let Some(stage) = scheme.classify(offset) else {
             return;
         };
@@ -613,10 +634,18 @@ impl Resource {
     }
 
     pub fn emit_at_origin(&mut self, rotation: f32, color: Color) {
-        if !self.config.particle {
+        if !self.config.particle || self.replay_view {
             return;
         }
         let pt = self.world_to_screen(Point::default());
+        if self.replay_capture {
+            self.replay_fx.push(crate::replay::Fx {
+                position: [if self.config.flip_x() { -pt.x } else { pt.x }, -pt.y],
+                rotation: if self.res_pack.info.hit_fx_rotate { rotation.to_radians() } else { 0. },
+                color: crate::replay::rgba(color),
+                size_ratio: self.emitter.emitter.config.size / (self.emitter.scale * self.config.note_scale / 5.).max(1e-6),
+            });
+        }
         self.emitter.emit_at(
             vec2(if self.config.flip_x() { -pt.x } else { pt.x }, -pt.y),
             if self.res_pack.info.hit_fx_rotate { rotation.to_radians() } else { 0. },
@@ -660,6 +689,9 @@ impl Resource {
 
     /// Visibility tests use the same camera view as the rendered chart.
     pub fn chart_view_point(&self, pt: Point, inverse: bool) -> Point {
+        if self.chart_post_view {
+            return pt;
+        }
         let width = self.camera.viewport.map_or(self.last_vp.2, |vp| vp.2).max(1) as f32;
         let (cx, cy) = self.practice_view.center(width);
         let cx = if self.config.flip_x() { -cx } else { cx };

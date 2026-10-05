@@ -76,7 +76,7 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional = true }
 unic-langid = { version = "0.9.6", features = ["macros"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
-zip = { workspace = true, default-features = false, features = ["deflate"] }
+zip = { workspace = true, default-features = false, features = ["deflate", "zstd"] }
 
 [target.'cfg(not(any(target_os = "android", target_env = "ohos")))'.dependencies]
 sasa = { workspace = true, default-features = true }

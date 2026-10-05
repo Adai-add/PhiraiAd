@@ -3,6 +3,7 @@
 use crate::ai_model::{
     cache::Document,
     features::{self, Features, Note},
+    sanitize,
 };
 use anyhow::{ensure, Context, Result};
 use prpr::core::{AnimFloat, Chart, ChartExtra, JudgeLine, NoteKind, HEIGHT_RATIO};
@@ -10,50 +11,75 @@ const ASPECT: f64 = 1.777778;
 fn value(a: &AnimFloat, t: f64) -> f64 {
     a.value_at(t).unwrap_or(0.) as f64
 }
-fn geometry(lines: &[JudgeLine], index: usize, t: f64, depth: usize) -> Result<([f64; 2], f64)> {
-    ensure!(depth < 128 && index < lines.len(), "判定线父子关系无效");
-    let line = &lines[index];
-    let mut p = [value(&line.object.translation.0, t), value(&line.object.translation.1, t) / ASPECT];
-    let mut rotation = value(&line.object.rotation, t);
-    if let Some(parent) = line.parent {
-        let (pp, pr) = geometry(lines, parent, t, depth + 1)?;
-        let r = pr.to_radians();
-        p = [pp[0] + p[0] * r.cos() - p[1] * r.sin(), pp[1] + p[0] * r.sin() + p[1] * r.cos()];
-        if line.rot_with_parent {
-            rotation += pr;
+fn geometry(lines: &[JudgeLine], index: usize, t: f64, _: usize) -> Result<([f64; 2], f64)> {
+    let mut chain = Vec::new();
+    let mut at = index;
+    while at < lines.len() && !chain.contains(&at) && chain.len() < 128 {
+        chain.push(at);
+        match lines[at].parent {
+            Some(p) => at = p,
+            None => break,
         }
+    }
+    let mut p = [0., 0.];
+    let mut rotation: f64 = 0.;
+    for i in chain.into_iter().rev() {
+        let line = &lines[i];
+        let local = [
+            features::finite(value(&line.object.translation.0, t), 0.),
+            features::finite(value(&line.object.translation.1, t) / ASPECT, 0.),
+        ];
+        let r = rotation.to_radians();
+        p = [
+            p[0] + local[0] * r.cos() - local[1] * r.sin(),
+            p[1] + local[0] * r.sin() + local[1] * r.cos(),
+        ];
+        let own = features::finite(value(&line.object.rotation, t), 0.);
+        rotation = if line.rot_with_parent { rotation + own } else { own };
     }
     Ok((p, rotation))
 }
 fn speed(a: &AnimFloat, t: f64) -> f64 {
+    speed_at(a, t, 0)
+}
+fn speed_at(a: &AnimFloat, t: f64, depth: usize) -> f64 {
+    if depth >= 128 {
+        return 0.;
+    }
     let i = a.keyframes.partition_point(|k| k.time < t).saturating_sub(1);
     let own = if let (Some(k), Some(next)) = (a.keyframes.get(i), a.keyframes.get(i + 1)) {
         let dt = next.time - k.time;
-        if dt <= 0. {
+        if !dt.is_finite() || dt <= 0. {
             0.
         } else {
             let u = ((t - k.time) / dt).clamp(0., 1.);
             let lo = (u - 0.001).max(0.);
             let hi = (u + 0.001).min(1.);
-            (next.value - k.value) as f64 / dt * (k.tween.y(hi as f32) - k.tween.y(lo as f32)) as f64 / (hi - lo)
+            features::finite((next.value - k.value) as f64 / dt * (k.tween.y(hi as f32) - k.tween.y(lo as f32)) as f64 / (hi - lo), 0.)
         }
     } else {
         0.
     };
-    own + a.next.as_ref().map_or(0., |n| speed(n, t))
+    features::finite(own + a.next.as_ref().map_or(0., |n| speed_at(n, t, depth + 1)), 0.)
 }
 pub fn extract(doc: &Document, checkpoint: &mut dyn FnMut() -> Result<()>) -> Result<Features> {
     if let Some(raw) = &doc.raw {
-        if raw["formatVersion"] == 3 {
+        if features::number(&raw["formatVersion"]) == Some(3.) {
             return features::extract(raw, checkpoint);
         }
-        if raw["formatVersion"] == 1 {
+        if features::number(&raw["formatVersion"]) == Some(1.) {
             let mut raw = raw.clone();
             raw["formatVersion"] = 3.into();
-            for line in raw["judgeLineList"].as_array_mut().context("缺少判定线")? {
-                for e in line["judgeLineMoveEvents"].as_array_mut().context("缺少移动事件")? {
+            for line in raw["judgeLineList"].as_array_mut().into_iter().flatten() {
+                if !line.is_object() {
+                    continue;
+                }
+                for e in line["judgeLineMoveEvents"].as_array_mut().into_iter().flatten() {
                     for (a, b) in [("start", "start2"), ("end", "end2")] {
-                        let v = e[a].as_f64().context("移动事件无效")?;
+                        if !e.is_object() {
+                            continue;
+                        }
+                        let v = features::number(&e[a]).unwrap_or(440260.);
                         let y = v % 1000.;
                         e[a] = serde_json::Value::from((v - y) / 1000. / 880.);
                         e[b] = serde_json::Value::from(y / 520.);
@@ -66,46 +92,61 @@ pub fn extract(doc: &Document, checkpoint: &mut dyn FnMut() -> Result<()>) -> Re
     checkpoint()?;
     let chart: Chart = if let Some(raw) = &doc.raw {
         ensure!(raw.get("META").is_some() && raw.get("judgeLineList").is_some(), "不支持的 JSON 谱面格式");
-        let mut raw = raw.clone();
-        for line in raw["judgeLineList"].as_array_mut().context("缺少判定线")? {
-            line["Texture"] = "line.png".into();
-            if let Some(ext) = line.get_mut("extended").and_then(|v| v.as_object_mut()) {
-                for k in ["textEvents", "gifEvents", "paintEvents"] {
-                    ext.remove(k);
-                }
-            }
-            if let Some(notes) = line.get_mut("notes").and_then(|v| v.as_array_mut()) {
-                for note in notes {
-                    if let Some(m) = note.as_object_mut() {
-                        m.remove("hitsound");
-                    }
-                }
-            }
-        }
+        ensure!(raw["judgeLineList"].as_array().is_none_or(|a| a.len() <= 10000), "判定线过多");
+        let raw = sanitize::rpe(raw);
         let mut fs = prpr::fs::fs_from_file(doc.info.parent().unwrap())?;
         let info: prpr::info::ChartInfo = serde_yaml::from_slice(&std::fs::read(&doc.info)?)?;
-        pollster::block_on(prpr::parse::parse_rpe(
-            &serde_json::to_string(&raw)?,
-            fs.as_mut(),
-            ChartExtra::default(),
-            info.use_rpe_170_speed.unwrap_or_default(),
-        ))?
+        let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pollster::block_on(prpr::parse::parse_rpe(
+                &serde_json::to_string(&raw).unwrap(),
+                fs.as_mut(),
+                ChartExtra::default(),
+                info.use_rpe_170_speed.unwrap_or_default(),
+            ))
+        }));
+        match parsed {
+            Ok(Ok(chart)) => chart,
+            error => {
+                let reason = match error {
+                    Ok(Err(e)) => e.to_string(),
+                    _ => "parser panic".into(),
+                };
+                tracing::warn!("AI RPE animation fallback: {reason}");
+                return sanitize::rpe_notes(&raw, checkpoint);
+            }
+        }
     } else if doc.format == "pbc" {
         let mut r = prpr::bin::BinaryReader::new(std::io::Cursor::new(&doc.bytes));
         r.read()?
     } else {
-        prpr::parse::parse_pec(
-            std::str::from_utf8(&doc.bytes)
-                .context("不支持的谱面编码")?
-                .trim_start_matches('\u{feff}'),
-            ChartExtra::default(),
-        )?
+        let text = std::str::from_utf8(&doc.bytes)
+            .context("不支持的谱面编码")?
+            .trim_start_matches('\u{feff}');
+        let repaired = sanitize::pec(text);
+        if !repaired
+            .lines()
+            .any(|s| matches!(s.split_whitespace().next(), Some("n1" | "n2" | "n3" | "n4")))
+        {
+            return sanitize::pec_notes(text, checkpoint);
+        }
+        let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prpr::parse::parse_pec(&repaired, ChartExtra::default())));
+        match parsed {
+            Ok(Ok(chart)) => chart,
+            error => {
+                let reason = match error {
+                    Ok(Err(e)) => e.to_string(),
+                    _ => "parser panic".into(),
+                };
+                tracing::warn!("AI PEC animation fallback: {reason}");
+                return sanitize::pec_notes(text, checkpoint);
+            }
+        }
     };
     ensure!(chart.lines.len() <= 10000, "判定线过多");
     let mut notes = Vec::new();
     for (index, line) in chart.lines.iter().enumerate() {
         for n in &line.notes {
-            if n.fake {
+            if n.fake || !n.time.is_finite() {
                 continue;
             }
             if notes.len() % 64 == 0 {

@@ -54,6 +54,8 @@ def write_plist(path):
         "UISupportedInterfaceOrientations": [
             "UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"
         ],
+        "NSPhotoLibraryAddUsageDescription": "用于将 Bn 成绩长图保存到系统相册。",
+        "NSPhotoLibraryUsageDescription": "用于将 Bn 成绩长图保存到系统相册。",
         "UIFileSharingEnabled": True,
         "LSSupportsOpeningDocumentsInPlace": True,
         "CFBundleURLTypes": [{"CFBundleURLName": "Phira", "CFBundleURLSchemes": ["phira"]}],
@@ -70,6 +72,9 @@ def verify_bundle(app):
     for name, value in expected.items():
         if config.get(name) != value:
             raise ValueError(f"Unexpected {name}: {config.get(name)!r}")
+    for key in ("NSPhotoLibraryAddUsageDescription", "NSPhotoLibraryUsageDescription"):
+        if not isinstance(config.get(key), str) or not config[key].strip():
+            raise ValueError(f"Missing photo library usage description: {key}")
     if config.get("CFBundleSupportedPlatforms") != ["iPhoneOS"]:
         raise ValueError("Bundle is not an iPhoneOS device build")
     if not (app / "phira-main").is_file():

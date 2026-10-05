@@ -40,6 +40,7 @@ impl Default for Band {
 pub struct Scheme {
     pub name: String,
     pub counts_local_score: bool,
+    pub combo_score_ratio: f64,
     pub boundaries_ms: Vec<f64>,
     pub bands: Vec<Band>,
 }
@@ -68,6 +69,7 @@ impl Scheme {
         Self {
             name: "新方案".into(),
             counts_local_score: false,
+            combo_score_ratio: 0.1,
             boundaries_ms: boundary_indices.iter().map(|&i| BOUNDARIES[i]).collect(),
             bands: indices
                 .iter()
@@ -96,6 +98,9 @@ impl Scheme {
         }
     }
     pub fn validate(&self) -> Result<(), String> {
+        if !self.combo_score_ratio.is_finite() || !(0.0..=1.0).contains(&self.combo_score_ratio) {
+            return Err("连击分数占比必须在 0% 到 100% 之间".into());
+        }
         if ![5, 7, 9].contains(&self.bands.len()) || self.boundaries_ms.len() != self.bands.len() {
             return Err("档位与边界数量不匹配".into());
         }
@@ -129,6 +134,28 @@ impl Scheme {
             Judgement::Good
         }
     }
+    /// Merge early/late variants into the same result category.
+    pub fn grouped_counts(&self, counts: &[u32; 9]) -> Vec<(String, u32)> {
+        ["perfect", "cool", "good", "normal", "bad", "miss"]
+            .into_iter()
+            .filter_map(|label| {
+                let matching: Vec<_> = self
+                    .bands
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| {
+                        b.label
+                            .strip_prefix("early ")
+                            .or_else(|| b.label.strip_prefix("late "))
+                            .unwrap_or(&b.label)
+                            == label
+                    })
+                    .collect();
+                (!matching.is_empty()).then(|| (label.to_uppercase(), matching.iter().map(|(i, _)| counts[*i]).sum()))
+            })
+            .collect()
+    }
+
     pub fn change_count(&mut self, count: usize) {
         if count == self.bands.len() {
             return;
@@ -136,6 +163,7 @@ impl Scheme {
         let mut next = Self::new(count);
         next.name = self.name.clone();
         next.counts_local_score = self.counts_local_score;
+        next.combo_score_ratio = self.combo_score_ratio;
         for band in &mut next.bands {
             if let Some(old) = self.bands.iter().find(|x| x.label == band.label) {
                 *band = old.clone();
@@ -301,5 +329,47 @@ mod tests {
         assert_eq!(c.schemes.len(), 8);
         let copy: CustomJudgementConfig = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(c, copy);
+    }
+}
+
+#[cfg(test)]
+mod score_ratio_tests {
+    use super::*;
+    #[test]
+    fn legacy_presets_default_to_ten_percent_and_ratio_survives_layout_changes() {
+        let mut scheme: Scheme = serde_json::from_str(r#"{"name":"旧方案"}"#).unwrap();
+        assert_eq!(scheme.combo_score_ratio, 0.1);
+        scheme.combo_score_ratio = 0.35;
+        scheme.change_count(9);
+        assert_eq!(scheme.combo_score_ratio, 0.35);
+        let restored: Scheme = serde_json::from_str(&serde_json::to_string(&scheme).unwrap()).unwrap();
+        assert_eq!(restored.combo_score_ratio, 0.35);
+        for ratio in [0., 1.] {
+            scheme.combo_score_ratio = ratio;
+            assert!(scheme.validate().is_ok());
+        }
+        for ratio in [-0.1, 1.1, f64::NAN] {
+            scheme.combo_score_ratio = ratio;
+            assert!(scheme.validate().is_err());
+        }
+    }
+    #[test]
+    fn nine_bands_merge_both_sides_and_preserve_all_note_counts() {
+        let scheme = Scheme::new(9);
+        let grouped = scheme.grouped_counts(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(
+            grouped,
+            vec![
+                ("PERFECT".into(), 5),
+                ("COOL".into(), 10),
+                ("GOOD".into(), 10),
+                ("NORMAL".into(), 10),
+                ("BAD".into(), 1),
+                ("MISS".into(), 9)
+            ]
+        );
+        assert_eq!(grouped.iter().map(|(_, count)| count).sum::<u32>(), 45);
+        assert_eq!(Scheme::new(5).grouped_counts(&[0; 9]).len(), 4);
+        assert_eq!(Scheme::new(7).grouped_counts(&[0; 9]).len(), 5);
     }
 }

@@ -1,4 +1,4 @@
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -12,9 +12,34 @@ pub struct Features {
     pub stats: Vec<f64>,
 }
 impl Features {
+    pub fn empty() -> Self {
+        Self {
+            events: Vec::new(),
+            note_groups: Vec::new(),
+            group_features: Vec::new(),
+            group_times: Vec::new(),
+            group_durations: Vec::new(),
+            stats: vec![0.; 18],
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
     pub fn validate(&self) -> Result<()> {
         let n = self.events.len();
         let g = self.group_features.len();
+        if n == 0 {
+            ensure!(
+                g == 0
+                    && self.note_groups.is_empty()
+                    && self.group_times.is_empty()
+                    && self.group_durations.is_empty()
+                    && self.stats.len() == 18
+                    && self.stats.iter().all(|v| v.is_finite()),
+                "空谱特征无效"
+            );
+            return Ok(());
+        }
         ensure!(n > 0 && n <= 200_000 && g > 0 && self.note_groups.len() == n, "音符/同刻组数量无效");
         for (rows, width) in [(&self.events, 17), (&self.group_features, 6)] {
             ensure!(rows.iter().all(|r| r.len() == width && r.iter().all(|v| v.is_finite())), "特征无效");
@@ -32,11 +57,23 @@ impl Features {
         Ok(())
     }
 }
+pub fn number(v: &Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+        .filter(|v| v.is_finite())
+}
 fn num(v: &Value) -> Result<f64> {
-    v.as_f64().filter(|v| v.is_finite()).context("谱面数字无效")
+    Ok(number(v).map(|v| finite(v, 0.)).unwrap_or(0.))
 }
 fn optional(v: &Value, key: &str, default: f64) -> Result<f64> {
-    v.get(key).map(num).unwrap_or(Ok(default))
+    Ok(v.get(key).and_then(number).map(|v| finite(v, default)).unwrap_or(default))
+}
+pub fn finite(v: f64, default: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(-1e12, 1e12)
+    } else {
+        default
+    }
 }
 fn round9(v: f64) -> f64 {
     format!("{v:.9}").parse().unwrap_or(v)
@@ -54,26 +91,32 @@ struct Track {
 impl Track {
     fn new(v: Option<&Value>, keys: &[&str], default: &[f64]) -> Result<Self> {
         let mut events = Vec::new();
-        let mut zero = false;
-        if let Some(v) = v {
-            for e in v.as_array().context("事件数组无效")? {
-                let a = num(&e["startTime"])?;
-                let b = num(&e["endTime"])?;
-                ensure!(b >= a, "判定线事件反向");
-                let values = keys.iter().map(|k| num(&e[*k])).collect::<Result<Vec<_>>>()?;
-                if b == a {
-                    if keys == ["value"] {
-                        zero = true;
-                        continue;
-                    }
-                    bail!("判定线事件零长度");
+        if let Some(array) = v.and_then(Value::as_array) {
+            for e in array {
+                let (Some(a), Some(b)) = (number(&e["startTime"]), number(&e["endTime"])) else {
+                    continue;
+                };
+                if b < a {
+                    continue;
+                } // Same treatment as Phira's invalid-time filter.
+                let mut values = Vec::new();
+                for (i, key) in keys.iter().enumerate() {
+                    let fallback = if keys.len() > 1 && i % 2 == 1 {
+                        values[i - 1]
+                    } else {
+                        default[if keys.len() == 1 { 0 } else { i / 2 }]
+                    };
+                    values.push(number(&e[*key]).map(|v| finite(v, fallback)).unwrap_or(fallback));
                 }
                 events.push(Event { a, b, v: values });
             }
         }
-        ensure!(!zero || !events.is_empty(), "只有零时长速度事件");
+        // Keep legacy reference behavior for speed sentinels when real intervals
+        // exist, but retain instant values if they are the only speed events.
+        if keys == ["value"] && events.iter().any(|e| e.b > e.a) {
+            events.retain(|e| e.b > e.a);
+        }
         events.sort_by(|a, b| a.a.total_cmp(&b.a));
-        ensure!(events.windows(2).all(|w| (w[0].b - w[1].a).abs() <= 1e-6), "判定线事件间隙或重叠");
         Ok(Self {
             events,
             default: default.into(),
@@ -88,7 +131,15 @@ impl Track {
         if e.v.len() == 1 {
             return e.v.clone();
         }
-        let f = ((t - e.a) / (e.b - e.a)).clamp(0., 1.);
+        let f = if e.b == e.a {
+            if t >= e.a {
+                1.
+            } else {
+                0.
+            }
+        } else {
+            ((t - e.a) / (e.b - e.a)).clamp(0., 1.)
+        };
         e.v.chunks_exact(2).map(|v| v[0] + (v[1] - v[0]) * f).collect()
     }
 }
@@ -122,44 +173,47 @@ impl Line {
     }
 }
 pub fn extract(raw: &Value, checkpoint: &mut dyn FnMut() -> Result<()>) -> Result<Features> {
-    ensure!(raw["formatVersion"].as_u64() == Some(3), "暂不支持此谱面格式（模型要求 Phigros format3）");
     let offset = optional(raw, "offset", 0.)?;
-    let lines = raw["judgeLineList"].as_array().context("缺少判定线")?;
+    let lines = raw["judgeLineList"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     ensure!(lines.len() <= 10000, "判定线过多");
+    let fallback_bpm = lines.iter().filter_map(|l| number(&l["bpm"])).find(|b| *b > 0.).unwrap_or(120.);
     let mut notes = Vec::new();
-    for (index, raw) in lines.iter().enumerate() {
+    for (index, raw) in lines.iter().take(10000).enumerate() {
         checkpoint()?;
-        let bpm = num(&raw["bpm"])?;
-        ensure!(bpm > 0., "BPM 无效");
+        let bpm = number(&raw["bpm"]).filter(|b| *b > 0.).unwrap_or(fallback_bpm).clamp(0.001, 1e6);
         let line = Line {
             bpm,
             movement: Track::new(raw.get("judgeLineMoveEvents"), &["start", "end", "start2", "end2"], &[0.5, 0.5])?,
             rotation: Track::new(raw.get("judgeLineRotateEvents"), &["start", "end"], &[0.])?,
             speed: Track::new(raw.get("speedEvents"), &["value"], &[1.])?,
         };
-        Track::new(raw.get("judgeLineDisappearEvents"), &["start", "end"], &[1.])?;
+        // Opacity is not a model feature; malformed visual events are irrelevant.
         for (field, side) in [("notesAbove", 1), ("notesBelow", -1)] {
-            if let Some(v) = raw.get(field) {
-                for n in v.as_array().context("音符数组无效")? {
+            if let Some(v) = raw.get(field).and_then(Value::as_array) {
+                for n in v {
                     if notes.len() % 128 == 0 {
                         checkpoint()?;
                     }
                     ensure!(notes.len() < 200_000, "音符过多");
-                    let kind = n["type"].as_u64().context("音符类型无效")? as usize;
-                    ensure!((1..=4).contains(&kind), "音符类型无效");
-                    ensure!(
-                        !n.get("isFake")
-                            .is_some_and(|v| v != &Value::Bool(false) && v != &Value::Null && v != &Value::from(0)),
-                        "format3 假音符扩展不受模型支持"
-                    );
-                    let tick = num(&n["time"])?;
-                    let hold = if kind == 3 { optional(n, "holdTime", 0.)? } else { 0. };
-                    ensure!(hold >= 0., "负长条时长");
+                    let Some(kind) = number(&n["type"])
+                        .filter(|v| v.fract() == 0. && (1. ..=4.).contains(v))
+                        .map(|v| v as usize)
+                    else {
+                        continue;
+                    };
+                    let fake = &n["isFake"];
+                    if fake == &Value::Bool(true) || number(fake).is_some_and(|v| v != 0.) {
+                        continue;
+                    }
+                    let Some(tick) = number(&n["time"]) else {
+                        continue;
+                    };
+                    let hold = if kind == 3 { optional(n, "holdTime", 0.)?.max(0.) } else { 0. };
                     let time = round9(tick * 1.875 / bpm + offset);
                     let end = round9(time + hold * 1.875 / bpm);
                     let x = num(&n["positionX"])?;
                     let speed = optional(n, "speed", 1.)?;
-                    optional(n, "floorPosition", 0.)?;
+                    // floorPosition is not used by feature extraction.
                     let past_tick = (time - 0.15 - offset) * line.bpm / 1.875;
                     notes.push(Note {
                         line: index,
@@ -216,7 +270,25 @@ fn quantile(v: &[f64], q: f64) -> f64 {
     v[lo] + (v[hi] - v[lo]) * (i - lo as f64)
 }
 pub fn from_notes(mut notes: Vec<Note>, checkpoint: &mut dyn FnMut() -> Result<()>) -> Result<Features> {
-    ensure!(!notes.is_empty(), "谱面没有音符");
+    checkpoint()?;
+    notes.retain(|n| (1..=4).contains(&n.kind) && n.time.is_finite());
+    ensure!(notes.len() <= 200_000, "音符过多");
+    for n in &mut notes {
+        n.time = finite(n.time, 0.);
+        n.end = finite(n.end, n.time).max(n.time);
+        n.x = finite(n.x, 0.);
+        n.speed = finite(n.speed, 1.);
+        n.line_speed = finite(n.line_speed, 1.);
+        n.rotation = finite(n.rotation, 0.);
+        n.past_rotation = finite(n.past_rotation, n.rotation);
+        for i in 0..2 {
+            n.point[i] = finite(n.point[i], if i == 0 { 0.5 } else { 0.5 / 1.777778 });
+            n.past[i] = finite(n.past[i], n.point[i]);
+        }
+    }
+    if notes.is_empty() {
+        return Ok(Features::empty());
+    }
     notes.sort_by(|a, b| {
         a.time
             .total_cmp(&b.time)
@@ -273,13 +345,23 @@ pub fn from_notes(mut notes: Vec<Note>, checkpoint: &mut dyn FnMut() -> Result<(
         if w > 0. {
             press_times.push(t);
         }
-        f.group_times.push(t - first);
+        let relative = t - first;
+        // Large offsets can make subtraction erase a small positive gap.
+        // group_times are metadata; keep them ordered without changing durations.
+        let relative = f
+            .group_times
+            .last()
+            .copied()
+            .filter(|last| relative <= *last)
+            .map_or(relative, f64::next_up);
+        f.group_times.push(relative);
         let next = if i + 1 < groups.len() {
             notes[groups[i + 1].start].time
         } else {
             end.max(t + 0.001)
         };
-        f.group_durations.push(next - t);
+        let gap = next - t;
+        f.group_durations.push(if gap.is_finite() && gap > 0. { gap } else { 0.001 });
         for n in &notes[g.clone()] {
             counts[n.kind - 1] += 1.;
             let v = n.line_speed * if n.kind == 3 { 1. } else { n.speed };
@@ -356,6 +438,11 @@ pub fn from_notes(mut notes: Vec<Note>, checkpoint: &mut dyn FnMut() -> Result<(
         gaps.iter().filter(|v| **v > 1.).sum::<f64>() / duration,
         notes.iter().map(|n| n.end - n.time).sum::<f64>() / duration,
     ]);
+    for row in f.events.iter_mut().chain(&mut f.group_features).chain(std::iter::once(&mut f.stats)) {
+        for v in row {
+            *v = finite(*v, 0.);
+        }
+    }
     f.validate()?;
     Ok(f)
 }

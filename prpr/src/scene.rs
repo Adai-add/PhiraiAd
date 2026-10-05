@@ -9,6 +9,9 @@ pub use ending::{EndingScene, RecordUpdateState};
 mod game;
 pub use game::{ChallengeEvent, GameMode, GameScene, SimpleRecord};
 
+mod replay;
+pub use replay::ReplayScene;
+
 mod loading;
 pub use loading::{BasicPlayer, LoadingScene, ReportFn, SaveFn, UpdateFn, UploadFn};
 
@@ -331,7 +334,7 @@ pub fn request_file(id: impl Into<String>) {
 
                 // Some providers do not recognize custom extensions such as
                 // .pez. Include public.data so those files remain selectable.
-                let mut types: Vec<_> = ["zip", "pez", "jpg", "png", "jpeg", "json", "mp3", "ogg"]
+                let mut types: Vec<_> = ["zip", "pez", "jpg", "png", "jpeg", "json", "mp3", "ogg", "ttf", "otf"]
                     .iter()
                     .filter_map(|e| UTType::typeWithFilenameExtension(&NSString::from_str(e)))
                     .collect();
@@ -351,7 +354,7 @@ pub fn request_file(id: impl Into<String>) {
                     use objc2_ui_kit::UIDocumentPickerMode;
 
                     let ext = NSString::from_str;
-                    let types = NSArray::from_retained_slice(&[ext("public.image"), ext("public.archive")]);
+                    let types = NSArray::from_retained_slice(&[ext("public.image"), ext("public.archive"), ext("public.data")]);
                     UIDocumentPickerViewController::initWithDocumentTypes_inMode(picker, &types, UIDocumentPickerMode::Import)
                 }
             };
@@ -381,6 +384,11 @@ pub fn return_file(id: String, file: String) {
 }
 
 pub trait Scene {
+    /// UI-only scenes can use SceneManager's display viewport for input instead
+    /// of the current offscreen chart framebuffer. Gameplay keeps its transform.
+    fn screen_touch_coordinates(&self) -> bool {
+        false
+    }
     fn enter(&mut self, _tm: &mut TimeManager, _target: Option<RenderTarget>) -> Result<()> {
         Ok(())
     }
@@ -506,7 +514,11 @@ impl Main {
             }
         }
         Judge::on_new_frame();
-        let mut touches = Judge::get_touches();
+        let mut touches = if self.scenes.last().unwrap().screen_touch_coordinates() {
+            Judge::replay_touches(self.viewport.unwrap_or((0, 0, screen_width() as i32, screen_height() as i32)))
+        } else {
+            Judge::get_touches()
+        };
         touches.iter_mut().for_each(f);
         if !(touches.is_empty() || FULL_LOADING.with(|it| it.borrow().is_some())) {
             let now = self.tm.now();

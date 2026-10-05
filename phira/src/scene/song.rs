@@ -49,7 +49,9 @@ use prpr::{
     },
     task::Task,
     time::TimeManager,
-    ui::{button_hit, render_chart_info, ChartInfoEdit, DRectButton, Dialog, LoadingParams, LongTouchState, RectButton, Scroll, Slider, Ui, UI_AUDIO},
+    ui::{
+        button_hit, render_chart_info, ChartInfoEdit, DRectButton, Dialog, LoadingParams, LongTouchState, RectButton, Scroll, Slider, Ui, UI_AUDIO,
+    },
 };
 use regex::Regex;
 use reqwest::Method;
@@ -1401,13 +1403,8 @@ impl SongScene {
                 .max_width(width - 0.06)
                 .draw();
             let flow_speed = get_data().config.global_note_flow_speed();
-            self.note_flow_slider.render(
-                ui,
-                Rect::new(width - 0.28, 0.10, 0.23, 0.09),
-                rt,
-                flow_speed,
-                format!("{flow_speed:.2}×"),
-            );
+            self.note_flow_slider
+                .render(ui, Rect::new(width - 0.28, 0.10, 0.23, 0.09), rt, flow_speed, format!("{flow_speed:.2}×"));
             dy!(0.23);
             let rh = ITEM_HEIGHT * 3. / 5.;
             let rr = Rect::new(width - 0.24, (ITEM_HEIGHT - rh) / 2., 0.2, rh);

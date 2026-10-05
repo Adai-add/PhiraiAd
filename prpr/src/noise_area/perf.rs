@@ -1,6 +1,6 @@
 //! Bounded, asynchronous diagnostics. No glFinish, readback, or file I/O on the render thread.
 use std::time::{Duration, Instant};
-const CHANNELS: usize = 12;
+const CHANNELS: usize = 13;
 pub const LABELS: [&str; CHANNELS] = [
     "geometry",
     "masks",
@@ -14,6 +14,7 @@ pub const LABELS: [&str; CHANNELS] = [
     "scene_restore",
     "disabled",
     "active",
+    "post_view",
 ];
 #[derive(Clone, Copy, Default)]
 struct Stats {

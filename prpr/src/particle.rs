@@ -423,6 +423,19 @@ pub struct Emitter {
 }
 
 impl Emitter {
+    pub fn advance(&mut self, dt: f32) {
+        let mut gl = unsafe { get_internal_gl() };
+        self.update(&mut gl.quad_context, dt.max(0.));
+    }
+
+    pub fn clear(&mut self) {
+        self.gpu_particles.clear();
+        self.cpu_counterpart.clear();
+        self.particles_spawned = 0;
+        self.last_emit_time = 0.;
+        self.time_passed = 0.;
+    }
+
     const MAX_PARTICLES: usize = 12000;
 
     pub fn new(config: EmitterConfig) -> Emitter {

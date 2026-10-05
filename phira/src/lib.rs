@@ -15,6 +15,8 @@ mod ai_chart_adapter;
 mod ai_model;
 mod ai_service;
 mod anim;
+mod bn_image;
+mod bn_import;
 mod censor;
 mod chart_play_settings;
 mod charts_view;
@@ -26,8 +28,10 @@ pub static PHIRAIAD_PRACTICE_LAYOUT_REVISION: [u8; 47] = *b"PHIRAIAD_PRACTICE_LA
 
 pub mod challenge;
 mod challenge_ui;
+mod custom_font;
 pub mod custom_rks;
 mod data;
+mod data_guard;
 pub mod deeplink;
 mod icons;
 mod images;
@@ -130,7 +134,9 @@ pub fn resolve_res_data(mut bytes: Vec<u8>) -> Result<Vec<u8>> {
 
 pub async fn load_res(name: &str) -> Result<Vec<u8>> {
     let result = async {
-        let bytes = load_file(name).await.with_context(|| format!("failed to read bundled resource: {name}"))?;
+        let bytes = load_file(name)
+            .await
+            .with_context(|| format!("failed to read bundled resource: {name}"))?;
         resolve_res_data(bytes).with_context(|| format!("failed to decode bundled resource: {name}"))
     }
     .await;
@@ -143,7 +149,8 @@ pub async fn load_res(name: &str) -> Result<Vec<u8>> {
 #[allow(unused)]
 pub async fn load_res_tex(name: &str) -> Result<SafeTexture> {
     let bytes = load_res(name).await?;
-    let image = image::load_from_memory(&bytes).with_context(|| format!("failed to decode bundled image: {name}"))
+    let image = image::load_from_memory(&bytes)
+        .with_context(|| format!("failed to decode bundled image: {name}"))
         .map_err(|err| {
             error!(resource = name, ?err, "bundled image loading failed");
             err
@@ -172,9 +179,15 @@ mod bundled_resource_tests {
     fn rejects_invalid_padding_and_compressed_data() {
         // Encoded blocks decode to eight 8s (invalid remainder), invalid padding,
         // and eight 1s (valid padding but invalid compressed payload), respectively.
-        assert!(resolve_res_data(vec![8, 16, 32, 32, 16, 32, 16, 64]).unwrap_err().to_string().contains("padding"));
+        assert!(resolve_res_data(vec![8, 16, 32, 32, 16, 32, 16, 64])
+            .unwrap_err()
+            .to_string()
+            .contains("padding"));
         assert!(resolve_res_data(vec![0, 0, 0, 2, 0, 0, 0, 3]).is_err());
-        assert!(resolve_res_data(vec![1, 2, 4, 4, 2, 4, 2, 8]).unwrap_err().to_string().contains("decompress"));
+        assert!(resolve_res_data(vec![1, 2, 4, 4, 2, 4, 2, 8])
+            .unwrap_err()
+            .to_string()
+            .contains("decompress"));
     }
 
     #[test]
@@ -214,7 +227,7 @@ pub fn get_data_mut() -> &'static mut Data {
 }
 
 pub fn save_data() -> Result<()> {
-    std::fs::write(format!("{}/data.json", dir::root()?), serde_json::to_string(get_data())?)?;
+    data_guard::save(std::path::Path::new(&dir::root()?), get_data())?;
     Ok(())
 }
 
@@ -311,10 +324,8 @@ async fn the_main() -> Result<()> {
 
     log::startup_checkpoint("05 saved data initialization");
     let dir = dir::root()?;
-    let mut data: Data = std::fs::read_to_string(format!("{dir}/data.json"))
-        .map_err(anyhow::Error::new)
-        .and_then(|s| Ok(serde_json::from_str(&s)?))
-        .unwrap_or_default();
+    prpr::replay::set_root(&dir);
+    let mut data: Data = data_guard::load(std::path::Path::new(&dir))?;
     data.init().await?;
     set_data(data);
     let _ = prpr::practice_audio::PREFERENCE_SAVER.set(|enabled| {
@@ -346,9 +357,10 @@ async fn the_main() -> Result<()> {
 
     log::startup_checkpoint("06 fonts");
     let pgr_font = FontArc::try_from_vec(load_file("phigros.ttf").await?)?;
-    PGR_FONT.with(move |it| *it.borrow_mut() = Some(TextPainter::new(pgr_font, None)));
+    PGR_FONT.with(|it| *it.borrow_mut() = Some(TextPainter::new(pgr_font.clone(), None)));
 
     let font = FontArc::try_from_vec(load_file("font.ttf").await?)?;
+    crate::custom_font::initialize(font.clone(), pgr_font);
     let mut painter = TextPainter::new(font.clone(), None);
 
     log::startup_checkpoint("07 MainScene construction");
@@ -397,6 +409,7 @@ async fn the_main() -> Result<()> {
             if first_frame {
                 log::startup_checkpoint("13 first frame render");
             }
+            crate::custom_font::apply(&mut painter);
             main.render(&mut painter)?;
             log::frame_checkpoint(diagnostic_frame, "render commands queued");
             if first_frame {
@@ -483,7 +496,11 @@ pub extern "C" fn quad_main() {
 }
 
 fn on_pause_resume(pause: bool) {
-    log::diagnostic_event(if pause { "LIFECYCLE native pause received" } else { "LIFECYCLE native resume received" });
+    log::diagnostic_event(if pause {
+        "LIFECYCLE native pause received"
+    } else {
+        "LIFECYCLE native resume received"
+    });
     if let Some(tx) = MESSAGES_TX.lock().unwrap().as_mut() {
         let _ = tx.send(pause);
     }

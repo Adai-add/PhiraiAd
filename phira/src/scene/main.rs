@@ -336,6 +336,7 @@ impl Scene for MainScene {
     }
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
+        prpr::replay::poll_saves();
         crate::ai_service::tick();
         UI_AUDIO.with(|it| it.borrow_mut().recover_if_needed())?;
         if get_data().config.mp_enabled {
@@ -407,6 +408,13 @@ impl Scene for MainScene {
         }
         if let Some((id, file)) = take_file() {
             match id.as_str() {
+                "_bn_import_image" => crate::bn_import::receive_file(file),
+                "_custom_font" => match crate::custom_font::import(&file) {
+                    Ok(()) => {
+                        show_message("自定义字体已应用").ok();
+                    }
+                    Err(error) => show_error(error),
+                },
                 "_import_auto" => {
                     let new_id = match File::open(&file).map(BufReader::new).map(zip::ZipArchive::new) {
                         Ok(Ok(zip)) => {
@@ -762,10 +770,7 @@ impl Scene for MainScene {
         set_camera(&ui.camera());
 
         if let Some(material) = &*STRIPE_MATERIAL {
-            material.set_uniform(
-                "time",
-                ((tm.real_time() * 0.025) % (std::f64::consts::PI * 2.)) as f32,
-            );
+            material.set_uniform("time", ((tm.real_time() * 0.025) % (std::f64::consts::PI * 2.)) as f32);
             gl_use_material(*material);
         } else {
             // On platforms where the stripe shader cannot be created (notably some iOS
@@ -881,10 +886,7 @@ static STRIPE_MATERIAL: Lazy<Option<Material>> = Lazy::new(|| {
     ) {
         Ok(material) => Some(material),
         Err(err) => {
-            warn!(
-                "failed to initialize stripe material; drawing background without stripe shader: {:?}",
-                err
-            );
+            warn!("failed to initialize stripe material; drawing background without stripe shader: {:?}", err);
             None
         }
     }

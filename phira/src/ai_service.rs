@@ -67,7 +67,7 @@ pub fn tick() {
                         file: Some(source.file.clone()),
                         stamp: Some(source),
                         value: Some(record.prediction.mean),
-                        message: "已缓存 · 5 模型均值".into(),
+                        message: record.prediction.message(),
                     },
                 ))
             })
@@ -251,7 +251,7 @@ impl Service {
                             return Ok(None);
                         };
                         if doc.needs_migration() {
-                            result = doc.save(&result)?;
+                            result = doc.save_or_keep(&result)?;
                         }
                         Ok(Some((Source::probe(&root)?, doc.format, result)))
                     }));
@@ -266,7 +266,7 @@ impl Service {
                                 file: Some(source.file.clone()),
                                 stamp: Some(source),
                                 value: Some(prediction.mean),
-                                message: "已缓存 · 5 模型均值".into(),
+                                message: prediction.message(),
                             },
                         );
                     }
@@ -307,7 +307,7 @@ impl Service {
                         // A copied cache may have appeared while this job was queued.
                         if let Some(mut prediction) = doc.cached() {
                             if doc.needs_migration() {
-                                prediction = doc.save(&prediction)?;
+                                prediction = doc.save_or_keep(&prediction)?;
                             }
                             return Ok((Source::probe(&root)?, doc.format, prediction));
                         }
@@ -329,7 +329,7 @@ impl Service {
                         let prediction = predictor.as_ref().unwrap().predict(&features, doc.hash.clone(), &mut check)?;
                         drop(features);
                         check()?;
-                        let prediction = doc.save(&prediction)?;
+                        let prediction = doc.save_or_keep(&prediction)?;
                         Ok((Source::probe(&root)?, doc.format, prediction))
                     }));
                 match operation {
@@ -347,7 +347,7 @@ impl Service {
                                 file: Some(source.file.clone()),
                                 stamp: Some(source),
                                 value: Some(prediction.mean),
-                                message: "已缓存 · 5 模型均值".into(),
+                                message: prediction.message(),
                             },
                         );
                     }

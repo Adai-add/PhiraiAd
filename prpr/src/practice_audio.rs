@@ -258,7 +258,30 @@ impl Music {
         noise_filter: bool,
         correct_sound: Option<crate::correct_sound::CorrectSoundTrack>,
     ) -> Result<Self> {
-        let backend = if correct_sound.is_none() && !noise_filter && (!preserve_pitch || (params.playback_rate - 1.).abs() < 1e-6) {
+        Self::new_inner(audio, clip, params, preserve_pitch, noise_filter, correct_sound, false)
+    }
+    /// Replays must never block the UI on sasa's native synchronous command queue.
+    pub fn new_replay(
+        audio: &mut AudioManager,
+        clip: AudioClip,
+        params: MusicParams,
+        preserve_pitch: bool,
+        noise_filter: bool,
+        correct_sound: Option<crate::correct_sound::CorrectSoundTrack>,
+    ) -> Result<Self> {
+        Self::new_inner(audio, clip, params, preserve_pitch, noise_filter, correct_sound, true)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn new_inner(
+        audio: &mut AudioManager,
+        clip: AudioClip,
+        params: MusicParams,
+        preserve_pitch: bool,
+        noise_filter: bool,
+        correct_sound: Option<crate::correct_sound::CorrectSoundTrack>,
+        replay: bool,
+    ) -> Result<Self> {
+        let backend = if !replay && correct_sound.is_none() && !noise_filter && (!preserve_pitch || (params.playback_rate - 1.).abs() < 1e-6) {
             Backend::Native(audio.create_music(clip, params)?)
         } else {
             let stream = PitchStream::new(clip.clone(), params.playback_rate, clip.sample_rate())?;
@@ -349,6 +372,37 @@ mod tests {
         assert!(music.play().is_err());
         assert!(music.pause().is_err());
         assert!(music.seek_to(0.).is_err());
+    }
+    #[test]
+    fn replay_countdown_and_pause_do_not_flood_unacknowledged_audio_queue() {
+        let (tx, rx) = mpsc::sync_channel(2);
+        let mut music = Music {
+            backend: Backend::Corrected {
+                shared: Arc::new(Shared::default()),
+                tx,
+            },
+            preserve_pitch: false,
+            noise_filter: Default::default(),
+        };
+        let mut requested = false;
+        // No mixer acknowledgements: simulate 3 seconds count-in, playback,
+        // pause, and hundreds of idle frames after the end of a replay.
+        for audible in std::iter::repeat_n(false, 360)
+            .chain(std::iter::repeat_n(true, 360))
+            .chain(std::iter::repeat_n(false, 360))
+        {
+            if let Some(play) = crate::replay::audio_transition(requested, audible) {
+                if play {
+                    music.play().unwrap();
+                } else {
+                    music.pause().unwrap();
+                }
+                requested = play;
+            }
+        }
+        assert!(matches!(rx.try_recv().unwrap(), Command::Play));
+        assert!(matches!(rx.try_recv().unwrap(), Command::Pause));
+        assert!(rx.try_recv().is_err());
     }
     fn tone(seconds: f64, sr: u32, frequency: f64) -> AudioClip {
         AudioClip::from_raw(

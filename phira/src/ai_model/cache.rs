@@ -80,6 +80,7 @@ impl Document {
         ensure!(bytes.len() as u64 == source.bytes, "谱面已变更，重新排队");
         let parse = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
         let raw = serde_json::from_slice::<Value>(parse).ok().filter(Value::is_object);
+        ensure!(raw.is_some() || !source.file.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")), "JSON 谱面损坏，无法读取");
         let format = source.format.clone().unwrap_or_else(|| {
             if let Some(raw) = &raw {
                 if raw.get("META").is_some() {
@@ -136,6 +137,19 @@ impl Document {
             return Some(p);
         }
         None
+    }
+    /// Preserve a computed result on cache I/O failure, but never attach it to
+    /// a chart that changed while prediction was running.
+    pub fn save_or_keep(&self, prediction: &Prediction) -> Result<Prediction> {
+        match self.save(prediction) {
+            Ok(saved) => Ok(saved),
+            Err(error) => {
+                ensure!(prediction.valid(&self.hash), "拒绝无效预测缓存");
+                ensure!(Source::probe(self.info.parent().unwrap())? == self.source, "谱面已变更，重新排队");
+                tracing::warn!("AI cache write failed; retaining prediction: {error}");
+                Ok(prediction.clone())
+            }
+        }
     }
     /// Returns the cache with its post-write size key, including its own bytes.
     pub fn save(&self, prediction: &Prediction) -> Result<Prediction> {

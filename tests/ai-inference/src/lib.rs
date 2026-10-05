@@ -64,6 +64,7 @@ mod cache_tests {
     }
     fn prediction(doc: &Document) -> Prediction {
         Prediction {
+            fallback: false,
             version: ai_model::VERSION.into(),
             chart_hash: doc.hash.clone(),
             model_hash: ai_model::model_hash(),
@@ -262,13 +263,47 @@ mod cache_tests {
         assert!(ai_model::index::chart_root(root.path(), "/absolute").is_none());
     }
     #[test]
-    fn malformed_charts_do_not_become_zero_predictions() {
+    fn cache_write_failure_preserves_result_but_changed_chart_is_rejected() {
+        let (root, _) = prepare();
+        let mut doc = Document::load(root.path()).unwrap();
+        let expected = prediction(&doc);
+        let blocked = root.path().join("blocked-cache-target");
+        std::fs::create_dir(&blocked).unwrap();
+        doc.file = blocked;
+        assert!(doc.save(&expected).is_err());
+        let kept = doc.save_or_keep(&expected).unwrap();
+        assert_eq!(kept.values, expected.values);
+        assert_eq!(kept.chart_hash, expected.chart_hash);
+        std::fs::write(root.path().join("chart.json"), b"{}").unwrap();
+        assert!(doc.save_or_keep(&expected).is_err());
+    }
+    #[test]
+    fn explicit_empty_fallback_survives_embedded_cache_round_trip() {
+        let (root, _) = prepare();
+        std::fs::write(root.path().join("chart.json"), br#"{"formatVersion":3,"judgeLineList":[]}"#).unwrap();
+        let doc = Document::load(root.path()).unwrap();
+        let f = ai_model::features::extract(doc.raw.as_ref().unwrap(), &mut || Ok(())).unwrap();
+        let p = ai_model::Predictor::new().unwrap().predict(&f, doc.hash.clone(), &mut || Ok(())).unwrap();
+        doc.save(&p).unwrap();
+        let cached = Document::load(root.path()).unwrap().cached().unwrap();
+        assert!(cached.fallback);
+        assert_eq!(cached.mean, 0.);
+        assert!(cached.message().contains("兜底"));
+    }
+    #[test]
+    fn broken_json_is_not_disguised_as_empty_prediction() {
+        let (root, _) = prepare();
+        std::fs::write(root.path().join("chart.json"), b"{broken JSON").unwrap();
+        assert!(Document::load(root.path()).is_err());
+    }
+    #[test]
+    fn malformed_local_fields_are_tolerated_and_cancellation_survives() {
         let (_, mut raw) = prepare();
         raw["judgeLineList"][0]["bpm"] = 0.into();
-        assert!(ai_model::features::extract(&raw, &mut || Ok(())).is_err());
+        assert!(ai_model::features::extract(&raw, &mut || Ok(())).is_ok());
         let (_, mut raw) = prepare();
         raw["judgeLineList"][0]["speedEvents"] = serde_json::json!([{"startTime":0,"endTime":0,"value":1}]);
-        assert!(ai_model::features::extract(&raw, &mut || Ok(())).is_err());
+        assert!(ai_model::features::extract(&raw, &mut || Ok(())).is_ok());
         let (_, raw) = prepare();
         let mut calls = 0;
         let e = ai_model::features::extract(&raw, &mut || {
@@ -292,5 +327,124 @@ mod queue_tests {
         assert!(allowed("c", &priority, false));
         assert!(!allowed("a", &priority, false));
         assert!(order(&paths, &BTreeSet::new(), false).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tolerance_tests {
+    use super::ai_model::{self, features, sanitize, Predictor};
+    use serde_json::json;
+    fn chart() -> serde_json::Value {
+        json!({"formatVersion":3,"judgeLineList":[{"bpm":120,"notesAbove":[{"type":1,"time":32,"positionX":0,"speed":1}]}]})
+    }
+    #[test]
+    fn reversed_unused_and_missing_events_do_not_change_stationary_notes() {
+        let raw = chart();
+        let expected = features::extract(&raw, &mut || Ok(())).unwrap();
+        let mut raw = raw;
+        raw["judgeLineList"][0]["judgeLineMoveEvents"] = json!([{"startTime":100,"endTime":20,"start":100,"end":200}]);
+        raw["judgeLineList"][0]["judgeLineDisappearEvents"] = json!("invalid visual data");
+        assert_eq!(serde_json::to_value(features::extract(&raw, &mut || Ok(())).unwrap()).unwrap(), serde_json::to_value(expected).unwrap());
+    }
+    #[test]
+    fn strings_invalid_bpm_types_fake_notes_and_negative_holds() {
+        let mut raw = chart();
+        raw["judgeLineList"][0]["bpm"] = json!("not a bpm");
+        raw["judgeLineList"][0]["notesAbove"] = json!([
+            {"type":"1","time":"32","positionX":"0"},
+            {"type":3,"time":64,"holdTime":-20},
+            {"type":7,"time":20}, {"type":1,"time":"NaN"}, {"type":1,"time":20,"isFake":true}]);
+        let f = features::extract(&raw, &mut || Ok(())).unwrap();
+        assert_eq!(f.events.len(), 2);
+        assert_eq!(f.group_times, vec![0., 0.5]);
+        assert_eq!(f.events[1][6], 0.);
+        assert!(Predictor::new()
+            .unwrap()
+            .predict(&f, "test".into(), &mut || Ok(()))
+            .unwrap()
+            .mean
+            .is_finite());
+    }
+    #[test]
+    fn gaps_overlaps_and_instant_events_remain_finite() {
+        let mut raw = chart();
+        raw["judgeLineList"][0]["judgeLineRotateEvents"] = json!([
+            {"startTime":0,"endTime":10,"start":0,"end":45},
+            {"startTime":5,"endTime":20,"start":30,"end":90},
+            {"startTime":32,"endTime":32,"start":90,"end":180}]);
+        let f = features::extract(&raw, &mut || Ok(())).unwrap();
+        f.validate().unwrap();
+        assert_eq!(f.events.len(), 1);
+    }
+    #[test]
+    fn empty_result_is_explicit_and_cancellation_is_not_swallowed() {
+        let f = features::extract(&json!({"judgeLineList":[]}), &mut || Ok(())).unwrap();
+        let p = Predictor::new().unwrap();
+        let result = p.predict(&f, "empty".into(), &mut || Ok(())).unwrap();
+        assert_eq!(result.values, vec![0.; 5]);
+        assert!(result.fallback);
+        assert!(result.valid("empty"));
+        assert!(result.message().contains("兜底"));
+        assert!(p.predict(&f, "empty".into(), &mut || anyhow::bail!("cancelled")).is_err());
+    }
+    #[test]
+    fn rpe_bad_bpm_parent_cycle_and_note_fields_are_repaired() {
+        let raw = json!({"META":{"offset":"bad"},"BPMList":[{"bpm":0,"startTime":[0,0,0]}],"judgeLineList":[{"father":1,"notes":[{"type":1,"startTime":[1,0,1],"positionX":"bad"}]},{"father":0,"notes":[{"type":2,"startTime":[2,0,1],"endTime":[1,0,1]}]}]});
+        let repaired = sanitize::rpe(&raw);
+        assert_eq!(repaired["judgeLineList"][1]["father"], -1);
+        let f = sanitize::rpe_notes(&raw, &mut || Ok(())).unwrap();
+        assert_eq!(f.events.len(), 2);
+        assert_eq!(f.events[1][6], 0.);
+        f.validate().unwrap();
+        assert!(Predictor::new()
+            .unwrap()
+            .predict(&f, "rpe".into(), &mut || Ok(()))
+            .unwrap()
+            .mean
+            .is_finite());
+    }
+    #[test]
+    fn pec_fallback_keeps_valid_notes_and_ignores_bad_commands() {
+        let f = sanitize::pec_notes(
+            "bad offset\nbp 0 0\n# 4\nunknown nonsense\ncm 0 5 2 0 0 1\nn1 0 1 0 1 0\nn2 0 2 1 0 1 0\nn1 0 invalid 0 1 0\nn3 0 3 0 1 1\n",
+            &mut || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(f.events.len(), 2);
+        assert_eq!(f.events[1][6], 0.);
+        f.validate().unwrap();
+    }
+    #[test]
+    fn pec_command_filter_removes_reversed_events_and_unsafe_ids_only() {
+        let text = "0\nbp 0 120\ncp 0 0 1024 700\ncm 0 5 2 0 0 1\nn1 999999999 1 0 1 0\nn1 0 1 0 1 0\nunknown command\n";
+        let repaired = sanitize::pec(text);
+        assert!(repaired.contains("cp 0 0 1024 700"));
+        assert!(repaired.contains("n1 0 1 0 1 0"));
+        assert!(!repaired.contains("cm "));
+        assert!(!repaired.contains("999999999"));
+        assert!(!repaired.contains("unknown"));
+    }
+    #[test]
+    fn large_time_offsets_do_not_destroy_group_order() {
+        let mut raw = chart();
+        raw["judgeLineList"][0]["bpm"] = json!(1e6);
+        raw["judgeLineList"][0]["notesAbove"] = json!([{"type":1,"time":-1e12},{"type":1,"time":0},{"type":1,"time":1}]);
+        let f = features::extract(&raw, &mut || Ok(())).unwrap();
+        assert_eq!(f.events.len(), 3);
+        f.validate().unwrap();
+        assert!(Predictor::new()
+            .unwrap()
+            .predict(&f, "time precision".into(), &mut || Ok(()))
+            .unwrap()
+            .mean
+            .is_finite());
+    }
+    #[test]
+    fn finite_extreme_feature_values_do_not_overflow_models() {
+        let mut raw = chart();
+        raw["judgeLineList"][0]["notesAbove"][0]["positionX"] = json!(1e250);
+        let f = features::extract(&raw, &mut || Ok(())).unwrap();
+        let p = Predictor::new().unwrap().predict(&f, "extreme".into(), &mut || Ok(())).unwrap();
+        assert!(p.values.iter().all(|v| v.is_finite()));
     }
 }

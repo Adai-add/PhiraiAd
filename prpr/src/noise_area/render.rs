@@ -1,10 +1,137 @@
 //! GLES2 adaptation of the extracted BlockRender passes.
-use super::{perf::Profiler, BlockArea, NoiseAreaState};
+use super::{
+    perf::{Profiler, Token},
+    BlockArea, NoiseAreaState,
+};
 use crate::core::Resource;
 use anyhow::{ensure, Result};
 use macroquad::prelude::*;
 use miniquad::{BlendFactor, BlendState, BlendValue, Equation, PipelineParams, UniformType};
 use std::collections::{HashMap, HashSet};
+/// Project noise geometry with the exact camera used for the chart. UVs are
+/// local to the full render target, including its letterboxed chart viewport.
+fn block_screen_uv(p: Vec2, aspect: f32, flip_x: bool, projection: Mat4, vp: (i32, i32, i32, i32), size: Vec2) -> Vec2 {
+    let world = p / (5. * aspect);
+    // The chart applies this reflection in its model stack before the camera.
+    let clip = projection * vec4(if flip_x { -world.x } else { world.x }, -world.y, 0., 1.);
+    let uv = (clip.truncate().truncate() / clip.w + Vec2::ONE) * 0.5;
+    (vec2(vp.0 as f32, vp.1 as f32) + uv * vec2(vp.2 as f32, vp.3 as f32)) / size
+}
+
+/// Native noise coordinates are independent of the practice camera. Only the
+/// final composition applies that camera; the atlas covers its inverse frustum.
+#[derive(Clone, Copy, Debug)]
+struct NoiseCanvas {
+    origin: Vec2,
+    span: Vec2,
+    anchor: Vec2,
+    shift: Vec2,
+    scale: f32,
+    native: Vec2,
+}
+impl NoiseCanvas {
+    fn new(view: crate::practice_view::PracticeView, vp: (i32, i32, i32, i32), native: Vec2) -> Self {
+        let scale = view.scale();
+        let anchor = (vec2(vp.0 as f32, vp.1 as f32) + vec2(vp.2 as f32, vp.3 as f32) * 0.5) / native;
+        let (cx, cy) = view.center(vp.2 as f32);
+        // Clip Y uses chart zoom; its center offset is measured in chart-width
+        // units. Thus both axes have the same pixel-to-UV factor.
+        let shift = vec2(cx * vp.2 as f32 / (2. * native.x), -cy * vp.2 as f32 / (2. * native.y));
+        let inverse = |uv: Vec2| anchor + (uv - anchor) / scale + shift;
+        let a = inverse(Vec2::ZERO);
+        let b = inverse(Vec2::ONE);
+        let margin = Vec2::splat(0.18);
+        let origin = a.min(b) - margin;
+        let span = (b - a).abs() + margin * 2.;
+        Self {
+            origin,
+            span,
+            anchor,
+            shift,
+            scale,
+            native,
+        }
+    }
+    fn screen(self, uv: Vec2) -> Vec2 {
+        self.anchor + (uv - self.anchor - self.shift) * self.scale
+    }
+    fn atlas(self, uv: Vec2) -> Vec2 {
+        (uv - self.origin) / self.span
+    }
+    fn screen_to_atlas(self, uv: Vec2) -> Vec2 {
+        self.atlas(self.anchor + (uv - self.anchor) / self.scale + self.shift)
+    }
+    fn dimensions(self) -> (u32, u32) {
+        // Use f64 for the budget: typed zoom values can expand the canvas far
+        // beyond the f32 pixel-area range without requiring a huge texture.
+        let x = self.native.x as f64 * self.span.x as f64;
+        let y = self.native.y as f64 * self.span.y as f64;
+        let factor = (4096. / x.max(y)).min((4_194_304. / (x * y)).sqrt()).min(1.);
+        ((x * factor).floor().max(1.) as u32, (y * factor).floor().max(1.) as u32)
+    }
+    fn projection(self, base: Mat4, vp: (i32, i32, i32, i32)) -> Mat4 {
+        let ratio = vec2(vp.2 as f32, vp.3 as f32) / self.native / self.span;
+        let offset = (self.anchor - self.origin) / self.span * 2. - Vec2::ONE;
+        Mat4::from_translation(vec3(offset.x, offset.y, 0.)) * Mat4::from_scale(vec3(ratio.x, ratio.y, 1.)) * base
+    }
+    fn uniform(self) -> Vec4 {
+        vec4(self.span.x, self.span.y, self.origin.x, self.origin.y)
+    }
+}
+const VIEW_DELTA: &str = r#"#version 100
+precision highp float;
+varying vec2 uv;
+uniform sampler2D Original; uniform sampler2D Rendered; uniform sampler2D Reference;
+uniform vec4 AtlasMap;
+void main(){vec2 p=uv*AtlasMap.xy+AtlasMap.zw;vec4 original=texture2D(Original,uv);
+vec4 rendered=texture2D(Rendered,p);vec4 reference=texture2D(Reference,p);
+gl_FragColor=vec4(original.rgb+rendered.rgb-reference.rgb,original.a);}"#;
+
+/// Evaluate procedural effects in canonical UVs; only intermediate framebuffer
+/// samples convert back into atlas UVs. Sprite textures remain local UVs.
+fn canvas_shader(vert: &str, frag: &str) -> (String, String) {
+    let mut frag = frag.to_owned();
+    let mut changed = false;
+    for name in [
+        "_MaskRT",
+        "_EffectRT",
+        "_SceneColor",
+        "_ComposeRT",
+        "_MainTex",
+        "_NormalBlockRT",
+        "_SubtractBlockRT",
+        "_DisabledNormalBlockRT",
+        "_DisabledSubtractBlockRT",
+        "Active",
+        "Ready",
+        "Normal",
+        "Subtract",
+        "Edge",
+        "Glow",
+        "Hover",
+    ] {
+        let from = format!("texture2D({name},");
+        if frag.contains(&from) {
+            frag = frag.replace(&from, &format!("noiseSample({name},"));
+            changed = true;
+        }
+    }
+    if !changed {
+        return (vert.to_owned(), frag);
+    }
+    let helper = "uniform vec4 NoiseDomain;\nvec4 noiseSample(sampler2D tex,vec2 p){return texture2D(tex,(p-NoiseDomain.zw)/NoiseDomain.xy); }\n";
+    frag = frag.replacen("void main()", &format!("{helper}void main()"), 1);
+    let (header, body) = vert.split_once("void main()").unwrap();
+    let re = regex::Regex::new(r"\btexcoord\b").unwrap();
+    let mut body = re.replace_all(body, "(texcoord * NoiseDomain.xy + NoiseDomain.zw)").into_owned();
+    // The touch distance uses projected UVs, not texture UVs.
+    if let Some(begin) = body.find("vs_TEXCOORD3 = vec4") {
+        let end = begin + body[begin..].find(';').unwrap() + 1;
+        body.insert_str(end, "\nvs_TEXCOORD3.xy=vs_TEXCOORD3.xy*NoiseDomain.xy+NoiseDomain.zw*vs_TEXCOORD3.w;");
+    }
+    (format!("{header}uniform vec4 NoiseDomain;\nvoid main(){body}"), frag)
+}
+
 const VERT: &str = r#"#version 100
 attribute vec3 position; attribute vec2 texcoord; attribute vec4 color0;
 uniform mat4 Model; uniform mat4 Projection;
@@ -115,6 +242,10 @@ struct ScreenQuad {
     points: [Vec2; 4],
     color: Color,
 }
+fn reusable_geometry(valid: bool, previous: &[Vec<ScreenQuad>; 6], current: &[Vec<ScreenQuad>; 6]) -> [bool; 6] {
+    std::array::from_fn(|i| valid && previous[i] == current[i])
+}
+
 const TOUCH_UNIFORMS: [&str; 10] = [
     "_TouchPos0",
     "_TouchPos1",
@@ -134,6 +265,8 @@ struct Program {
 }
 impl Program {
     fn new(vert: &str, frag: &str, blend: Option<BlendState>) -> Result<Self> {
+        let (vert, frag) = canvas_shader(vert, frag);
+        let (vert, frag) = (vert.as_str(), frag.as_str());
         let regex = regex::Regex::new(r"uniform\s+(?:(?:highp|mediump|lowp)\s+)?(float|int|vec2|vec3|vec4|sampler2D)\s+(\w+)\s*;")?;
         let mut uniforms = HashMap::new();
         let mut textures = HashSet::new();
@@ -174,11 +307,13 @@ impl Program {
             },
         )?;
         tracing::info!(stage = "shader_ready", shader = label, elapsed_ms = started.elapsed().as_millis(), "noise-area initialization");
-        Ok(Self {
+        let program = Self {
             material,
             uniforms,
             textures,
-        })
+        };
+        program.v4("NoiseDomain", vec4(1., 1., 0., 0.));
+        Ok(program)
     }
     fn f(&self, n: &str, v: f32) {
         if self.uniforms.contains_key(n) {
@@ -225,45 +360,53 @@ struct Targets {
     h: u32,
     targets: Vec<RenderTarget>,
 }
+fn target_sizes(w: u32, h: u32, precise: bool, low: bool) -> [(u32, u32); 21] {
+    let divisor = if low { 12 } else { 8 };
+    let (bw, bh) = ((w / divisor).max(1), (h / divisor).max(1));
+    let (ew, eh) = if precise { (w, h) } else { (bw * 2, bh * 2) };
+    let ss = supersampling(w, h);
+    // 0/1 active masks, 2/3 ready, 4/5 disabled, 6 subtract active,
+    // 7 subtract ready, 8 compose active, 9 compose ready, 10 disabled,
+    // 11 edge, 12/13 glow ping-pong, 14 hover, 15 packed masks,
+    // 16 packed effects, 17 scene color, 18/19 supersample geometry.
+    [
+        (bw, bh),
+        (bw, bh),
+        (bw, bh),
+        (bw, bh),
+        (bw, bh),
+        (bw, bh),
+        (bw, bh),
+        (bw, bh),
+        if precise { (w, h) } else { (bw, bh) },
+        (bw, bh),
+        (bw, bh),
+        (ew, eh),
+        if precise { ((w / 2).max(1), (h / 2).max(1)) } else { (ew, eh) },
+        if precise { ((w / 2).max(1), (h / 2).max(1)) } else { (ew, eh) },
+        (bw, bh),
+        if precise { (w, h) } else { (bw, bh) },
+        (ew, eh),
+        ((w / if low { 10 } else { 6 }).max(1), (h / if low { 10 } else { 6 }).max(1)),
+        if precise { (w * ss, h * ss) } else { (1, 1) },
+        if precise { (w * ss, h * ss) } else { (1, 1) },
+        (bw, bh),
+    ]
+}
+
 impl Targets {
     fn new(w: u32, h: u32, precise: bool, low: bool) -> Self {
-        let divisor = if low { 12 } else { 8 };
-        let (bw, bh) = ((w / divisor).max(1), (h / divisor).max(1));
-        let (ew, eh) = if precise { (w, h) } else { (bw * 2, bh * 2) };
-        let ss = supersampling(w, h);
-        // 0/1 active masks, 2/3 ready, 4/5 disabled, 6 subtract active,
-        // 7 subtract ready, 8 compose active, 9 compose ready, 10 disabled,
-        // 11 edge, 12/13 glow ping-pong, 14 hover, 15 packed masks,
-        // 16 packed effects, 17 scene color, 18/19 supersample geometry.
-        let sizes = [
-            (bw, bh),
-            (bw, bh),
-            (bw, bh),
-            (bw, bh),
-            (bw, bh),
-            (bw, bh),
-            (bw, bh),
-            (bw, bh),
-            if precise { (w, h) } else { (bw, bh) },
-            (bw, bh),
-            (bw, bh),
-            (ew, eh),
-            if low && precise { ((w / 2).max(1), (h / 2).max(1)) } else { (ew, eh) },
-            if low && precise { ((w / 2).max(1), (h / 2).max(1)) } else { (ew, eh) },
-            (bw, bh),
-            if precise { (w, h) } else { (bw, bh) },
-            (ew, eh),
-            ((w / if low { 10 } else { 6 }).max(1), (h / if low { 10 } else { 6 }).max(1)),
-            if precise { (w * ss, h * ss) } else { (1, 1) },
-            if precise { (w * ss, h * ss) } else { (1, 1) },
-            (bw, bh),
-        ];
+        let sizes = target_sizes(w, h, precise, low);
         let targets = sizes
             .into_iter()
             .enumerate()
             .map(|(i, (x, y))| {
                 let r = render_target(x, y);
-                r.texture.set_filter(if i == 16 { FilterMode::Linear } else { FilterMode::Nearest });
+                r.texture.set_filter(if matches!(i, 12 | 13 | 16) {
+                    FilterMode::Linear
+                } else {
+                    FilterMode::Nearest
+                });
                 r
             })
             .collect();
@@ -281,24 +424,163 @@ impl Drop for Targets {
 }
 /// Simple mode uses only the engine's ordinary colored-triangle renderer.
 /// Settings are selected before loading a chart, so its effect pipeline is optional.
+struct ViewTargets {
+    work: Option<crate::core::MSRenderTarget>,
+    reference: RenderTarget,
+    composite: Program,
+    dimensions: (u32, u32),
+}
+impl ViewTargets {
+    fn new(dimensions: (u32, u32)) -> Result<Self> {
+        let composite = Program::new(VERT, VIEW_DELTA, None)?;
+        let reference = render_target(dimensions.0, dimensions.1);
+        reference.texture.set_filter(FilterMode::Linear);
+        Ok(Self {
+            work: Some(crate::core::MSRenderTarget::new(dimensions, 1)),
+            reference,
+            composite,
+            dimensions,
+        })
+    }
+}
+impl Drop for ViewTargets {
+    fn drop(&mut self) {
+        let mut gl = unsafe { get_internal_gl() };
+        gl.flush();
+        self.reference.render_pass.delete(gl.quad_context);
+    }
+}
 pub struct NoiseRenderer {
     effects: Option<EffectRenderer>,
+    view_targets: Option<ViewTargets>,
     basic_profiler: Option<Profiler>,
+    view_profiler: Option<Profiler>,
 }
 impl NoiseRenderer {
     pub async fn new(low: bool) -> Result<Self> {
         Ok(Self {
             effects: if low { None } else { Some(EffectRenderer::new().await?) },
+            view_targets: None,
             basic_profiler: if low { Some(Profiler::new()) } else { None },
+            view_profiler: None,
         })
     }
-    pub fn render(&mut self, res: &mut Resource, areas: &[BlockArea], state: &NoiseAreaState, full_vp: (i32, i32, i32, i32)) -> Result<()> {
+    pub fn begin_composite(&mut self, low: bool, precise: bool, width: u32, height: u32) -> Token {
+        let profiler = self.view_profiler.get_or_insert_with(Profiler::new);
+        profiler.frame(low, precise, width, height);
+        profiler.begin(12)
+    }
+    pub fn end_composite(&mut self, token: Token) {
+        if let Some(profiler) = &mut self.view_profiler {
+            profiler.end(token);
+        }
+    }
+    pub fn render(
+        &mut self,
+        res: &mut Resource,
+        areas: &[BlockArea],
+        state: &NoiseAreaState,
+        full_vp: (i32, i32, i32, i32),
+        projection: Mat4,
+    ) -> Result<()> {
+        if !res.config.noise_area.enabled {
+            return Ok(());
+        }
+        // Existing post-view composition already generates native noise first.
+        // The expanded-frustum path needs a dedicated native noise canvas.
+        if res.chart_post_view || res.practice_view == Default::default() {
+            if let Some(effects) = &mut self.effects {
+                effects.canvas = None;
+            }
+            return self.render_native(res, areas, state, full_vp, projection);
+        }
+        if !areas.iter().any(|a| a.visible(res.time as f32)) && !state.hovers.iter().any(|h| h.scale > 0.) {
+            return Ok(());
+        }
+        let Some(mut original_target) = res.chart_target.take() else {
+            return Ok(());
+        };
+        let source = original_target.output().texture;
+        let native = vec2(source.width(), source.height());
+        let original_vp = res.camera.viewport;
+        let cv = original_vp.unwrap_or(full_vp);
+        let local_vp = (cv.0 - full_vp.0, cv.1 - full_vp.1, cv.2, cv.3);
+        let canvas = NoiseCanvas::new(res.practice_view, local_vp, native);
+        let dimensions = canvas.dimensions();
+        // Allocation may fail while compiling the tiny composition shader.
+        if self.view_targets.as_ref().is_none_or(|targets| targets.dimensions != dimensions) {
+            match ViewTargets::new(dimensions) {
+                Ok(targets) => self.view_targets = Some(targets),
+                Err(err) => {
+                    res.chart_target = Some(original_target);
+                    return Err(err);
+                }
+            }
+        }
+        let saved_viewport = unsafe { get_internal_gl() }.quad_gl.get_viewport();
+        push_camera_state();
+        let reference = self.view_targets.as_ref().unwrap().reference;
+        EffectRenderer::camera(reference);
+        unsafe { get_internal_gl() }.quad_gl.scissor(None);
+        gl_use_default_material();
+        clear_background(BLANK);
+        let corners = [Vec2::ZERO, vec2(1., 0.), Vec2::ONE, vec2(0., 1.)];
+        EffectRenderer::mesh_uv(corners, corners.map(|uv| canvas.screen(canvas.origin + uv * canvas.span)), source);
+        unsafe { get_internal_gl() }.flush();
+        res.chart_target = self.view_targets.as_mut().unwrap().work.take();
+        EffectRenderer::camera(res.chart_target.as_ref().unwrap().output());
+        clear_background(BLANK);
+        EffectRenderer::mesh_uv(corners, corners, reference.texture);
+        unsafe { get_internal_gl() }.flush();
+        res.camera.viewport = Some((0, 0, dimensions.0 as i32, dimensions.1 as i32));
+        if let Some(effects) = &mut self.effects {
+            effects.canvas = Some(canvas);
+        }
+        let base = Mat4::from_scale(vec3(res.camera.zoom.x, res.camera.zoom.y, 1.));
+        let result = self.render_native(res, areas, state, (0, 0, dimensions.0 as i32, dimensions.1 as i32), canvas.projection(base, local_vp));
+        let rendered = res.chart_target.as_ref().unwrap().output().texture;
+        self.view_targets.as_mut().unwrap().work = res.chart_target.take();
+        res.camera.viewport = original_vp;
+        if let Some(effects) = &mut self.effects {
+            effects.canvas = None;
+        }
+        if result.is_ok() {
+            original_target.swap();
+            EffectRenderer::camera(original_target.output());
+            let program = &self.view_targets.as_ref().unwrap().composite;
+            let a = canvas.screen_to_atlas(Vec2::ZERO);
+            let b = canvas.screen_to_atlas(Vec2::ONE);
+            program.v4("AtlasMap", vec4(b.x - a.x, b.y - a.y, a.x, a.y));
+            program.material.set_texture("Original", source);
+            program.material.set_texture("Rendered", rendered);
+            program.material.set_texture("Reference", reference.texture);
+            gl_use_material(program.material);
+            EffectRenderer::quad();
+            gl_use_default_material();
+            unsafe { get_internal_gl() }.flush();
+        }
+        res.chart_target = Some(original_target);
+        pop_camera_state();
+        let gl = unsafe { get_internal_gl() };
+        gl.quad_gl.render_pass(Some(res.chart_target.as_ref().unwrap().output().render_pass));
+        gl.quad_gl.viewport(saved_viewport);
+        result
+    }
+
+    fn render_native(
+        &mut self,
+        res: &mut Resource,
+        areas: &[BlockArea],
+        state: &NoiseAreaState,
+        full_vp: (i32, i32, i32, i32),
+        projection: Mat4,
+    ) -> Result<()> {
         if !res.config.noise_area.enabled {
             return Ok(());
         }
         if !res.config.noise_area.low_performance {
             if let Some(effects) = &mut self.effects {
-                return effects.render(res, areas, state, full_vp);
+                return effects.render(res, areas, state, full_vp, projection);
             }
         }
         if !areas.iter().any(|a| a.visible(res.time as f32)) {
@@ -332,7 +614,7 @@ impl NoiseRenderer {
             if pose.size.x.abs() < 0.0001 || pose.size.y.abs() < 0.0001 {
                 continue;
             }
-            let points = pose.corners().map(|p| EffectRenderer::screen_uv(p, res, vp, w, h));
+            let points = pose.corners().map(|p| EffectRenderer::screen_uv(p, res, vp, w, h, projection));
             if !points.iter().all(|p| p.is_finite()) {
                 continue;
             }
@@ -343,7 +625,7 @@ impl NoiseRenderer {
             };
             if phase == 0 {
                 let adjusted = adjusted_pose(pose, area.is_subtract);
-                let points = adjusted.corners().map(|p| EffectRenderer::screen_uv(p, res, vp, w, h));
+                let points = adjusted.corners().map(|p| EffectRenderer::screen_uv(p, res, vp, w, h, projection));
                 if points.iter().all(|p| p.is_finite()) {
                     if area.is_subtract {
                         adjusted_holes.push(points);
@@ -624,6 +906,7 @@ fn mask_polygons(normals: &[[Vec2; 4]], subtracts: &[[Vec2; 4]], screen: &[Vec2;
 }
 struct EffectRenderer {
     programs: Vec<Program>,
+    canvas: Option<NoiseCanvas>,
     sprite: Program,
     hover_sprite: Program,
     mask: Program,
@@ -633,6 +916,9 @@ struct EffectRenderer {
     precise_enabled: bool,
     precise_cache_valid: bool,
     precise_geometry: [Vec<ScreenQuad>; 2],
+    cached_geometry: [Vec<ScreenQuad>; 6],
+    static_cache_valid: bool,
+    cached_hover: bool,
     low_enabled: bool,
     variants: Vec<Program>,
     fused_effect: Program,
@@ -678,6 +964,7 @@ impl EffectRenderer {
         touch.set_filter(FilterMode::Linear);
         tracing::info!(stage = "textures_ready", "noise-area initialization");
         let mut renderer = Self {
+            canvas: None,
             programs: vec![
                 program!("SubtractBlockBlender_program_0"),
                 program!("SubtractBlockBlender_program_1"),
@@ -706,6 +993,9 @@ impl EffectRenderer {
             precise_enabled: false,
             precise_cache_valid: false,
             precise_geometry: std::array::from_fn(|_| Vec::new()),
+            cached_geometry: std::array::from_fn(|_| Vec::new()),
+            static_cache_valid: false,
+            cached_hover: false,
             low_enabled: false,
             variants: Vec::new(),
             fused_effect: Program::new(VERT, &PACK_EFFECT.replace("texture2D(Edge,uv).r", "texture2D(Glow,uv).b"), None)?,
@@ -785,11 +1075,19 @@ impl EffectRenderer {
         profiler.end(timing);
         Ok(())
     }
-    fn screen_uv(p: Vec2, res: &Resource, vp: (i32, i32, i32, i32), w: f32, h: f32) -> Vec2 {
-        let x = p.x / (5. * res.aspect_ratio) * if res.config.flip_x() { -1. } else { 1. };
-        let y = -p.y / (5. * res.aspect_ratio);
-        let (x, y) = res.practice_view.chart_to_screen(x, y, vp.2 as f32);
-        vec2((vp.0 as f32 + (x + 1.) * 0.5 * vp.2 as f32) / w, (vp.1 as f32 + (1. - y * res.aspect_ratio) * 0.5 * vp.3 as f32) / h)
+    fn mesh_uv(points: [Vec2; 4], uv: [Vec2; 4], texture: Texture2D) {
+        let vertices = std::array::from_fn::<_, 4, _>(|i| macroquad::models::Vertex {
+            position: vec3(points[i].x * 2. - 1., points[i].y * 2. - 1., 0.),
+            uv: uv[i],
+            color: WHITE,
+        });
+        let gl = unsafe { get_internal_gl() }.quad_gl;
+        gl.texture(Some(texture));
+        gl.draw_mode(DrawMode::Triangles);
+        gl.geometry(&vertices, &[0, 1, 2, 0, 2, 3]);
+    }
+    fn screen_uv(p: Vec2, res: &Resource, vp: (i32, i32, i32, i32), w: f32, h: f32, projection: Mat4) -> Vec2 {
+        block_screen_uv(p, res.aspect_ratio, res.config.flip_x(), projection, vp, vec2(w, h))
     }
     fn mesh(points: [Vec2; 4], color: Color, tex: Option<Texture2D>) {
         let uv = [vec2(0., 0.), vec2(1., 0.), vec2(1., 1.), vec2(0., 1.)];
@@ -804,7 +1102,14 @@ impl EffectRenderer {
         gl.geometry(&vertices, &[0, 1, 2, 0, 2, 3]);
     }
 
-    pub fn render(&mut self, res: &mut Resource, areas: &[BlockArea], state: &NoiseAreaState, full_vp: (i32, i32, i32, i32)) -> Result<()> {
+    pub fn render(
+        &mut self,
+        res: &mut Resource,
+        areas: &[BlockArea],
+        state: &NoiseAreaState,
+        full_vp: (i32, i32, i32, i32),
+        projection: Mat4,
+    ) -> Result<()> {
         if !res.config.noise_area.enabled {
             return Ok(());
         }
@@ -819,11 +1124,24 @@ impl EffectRenderer {
         let (w, h) = (source.width() as u32, source.height() as u32);
         let precise = res.config.noise_area.precise_edges;
         let low = res.config.noise_area.low_performance;
+        let native_size = self.canvas.map_or(vec2(w as f32, h as f32), |c| c.native);
+        let domain = self.canvas.map_or(vec4(1., 1., 0., 0.), NoiseCanvas::uniform);
+        for program in
+            self.programs
+                .iter()
+                .chain(self.variants.iter())
+                .chain(self.precise.iter())
+                .chain([&self.mask, &self.effect, &self.fused_effect])
+        {
+            program.v4("NoiseDomain", domain);
+        }
+        let canonical_sizes = target_sizes(native_size.x as u32, native_size.y as u32, precise, low);
         self.profiler.frame(low, precise, w, h);
         if self.targets.as_ref().is_none_or(|t| t.w != w || t.h != h) || self.precise_enabled != precise || self.low_enabled != low {
             tracing::info!(stage = "targets_begin", width = w, height = h, precise, "noise-area initialization");
             self.targets = Some(Targets::new(w, h, precise, low));
             self.precise_cache_valid = false;
+            self.static_cache_valid = false;
             tracing::info!(stage = "targets_ready", "noise-area initialization");
             self.precise_enabled = precise;
             self.low_enabled = low;
@@ -855,11 +1173,12 @@ impl EffectRenderer {
                 points: area
                     .pose(t, res.aspect_ratio)
                     .corners()
-                    .map(|p| Self::screen_uv(p, res, vp, w as f32, h as f32)),
+                    .map(|p| Self::screen_uv(p, res, vp, w as f32, h as f32, projection)),
                 color: Color::new(1., if area.is_subtract { fade } else { 1. }, 1., if area.is_subtract { 0.1 } else { fade }),
             });
         }
         self.profiler.end(geometry_timing);
+        let reuse_groups: [bool; 6] = reusable_geometry(self.static_cache_valid, &self.cached_geometry, &self.geometry);
         let active = !self.geometry[0].is_empty() || !self.geometry[1].is_empty();
         let reuse_precise = precise
             && active
@@ -885,7 +1204,7 @@ impl EffectRenderer {
         for hover in state.hovers.iter().filter(|hover| hover.scale > 0.) {
             // Sprite fits in this enclosing square; includes hiding/reused slots.
             for delta in [vec2(-0.22, -0.22), vec2(-0.22, 0.22), vec2(0.22, -0.22), vec2(0.22, 0.22)] {
-                active_coverage.add(Self::screen_uv(hover.position + delta * hover.scale, res, vp, w as f32, h as f32));
+                active_coverage.add(Self::screen_uv(hover.position + delta * hover.scale, res, vp, w as f32, h as f32, projection));
             }
         }
         // Mask displacement is <= 0.1 * sqrt(0.5) per UV axis. The largest
@@ -914,6 +1233,9 @@ impl EffectRenderer {
                     continue;
                 }
                 tex[i] = rt[i].texture;
+                if i < 6 && reuse_groups[i] {
+                    continue;
+                }
                 let timing = self.profiler.begin(1);
                 Self::camera(rt[i]);
                 clear_background(BLANK);
@@ -934,7 +1256,7 @@ impl EffectRenderer {
                         ];
                         let vertices = std::array::from_fn::<_, 6, _>(|i| {
                             let p = local[i];
-                            let pos = Self::screen_uv(center + p * hover.scale, res, vp, w as f32, h as f32);
+                            let pos = Self::screen_uv(center + p * hover.scale, res, vp, w as f32, h as f32, projection);
                             macroquad::models::Vertex {
                                 position: vec3(pos.x * 2. - 1., pos.y * 2. - 1., 0.),
                                 uv: p / 0.44 + Vec2::splat(0.5),
@@ -960,6 +1282,9 @@ impl EffectRenderer {
                     continue;
                 }
                 tex[target] = rt[target].texture;
+                if reuse_groups[input] {
+                    continue;
+                }
                 self.programs[p].f("_ClampThresholdLow", 0.09);
                 self.programs[p].f("_ClampThresholdHigh", 0.12);
                 Self::pass(&self.programs[p], rt[target], &[("_MainTex", tex[input])], true, &mut self.profiler, 2, None)?;
@@ -974,6 +1299,9 @@ impl EffectRenderer {
                     continue;
                 }
                 tex[target] = rt[target].texture;
+                if p == 3 && reuse_groups[2] && reuse_groups[3] {
+                    continue;
+                }
                 let pr = &self.programs[p];
                 pr.v4("_BlockTime", vec4(t / 20., t, t * 2., t * 3.));
                 let (bindings, len) = compose_textures(tex[n], tex[s], (p == 2).then_some(self.noise));
@@ -985,21 +1313,26 @@ impl EffectRenderer {
             if precise && active && !reuse_precise {
                 let pr = &self.precise[supersampling(w, h).trailing_zeros() as usize];
                 pr.v2("SourceSize", vec2(rt[18].texture.width(), rt[18].texture.height()));
-                pr.v2("TargetSize", vec2(w as f32, h as f32));
+                pr.v2("TargetSize", native_size);
                 Self::pass(pr, rt[8], &[("Normal", tex[18]), ("Subtract", tex[19])], true, &mut self.profiler, 4, None)?;
             }
             let ew = rt[11].texture.width();
             let eh = rt[11].texture.height();
             let dilation = if precise { 4. } else { 1. };
-            let texel = vec4(dilation / ew, dilation / eh, ew, eh);
+            let canonical_ew = canonical_sizes[11].0 as f32;
+            let canonical_eh = canonical_sizes[11].1 as f32;
+            let texel = vec4(dilation / canonical_ew, dilation / canonical_eh, canonical_ew, canonical_eh);
             let mut glow = 8;
             if reuse_precise {
                 glow = 12; // Five ping-pong passes always finish in target 12.
                 tex[glow] = rt[glow].texture;
             }
+            if precise && active && reuse_precise {
+                tex[11] = rt[11].texture;
+            }
             if active && !reuse_precise {
-                // Full-resolution precise edge is kept when low-mode glow is downsampled.
-                if low && precise {
+                // Keep the exact edge at full resolution; glow alone is half size.
+                if precise {
                     tex[11] = rt[11].texture;
                     self.programs[4].v4("_DilateTexelSize", texel);
                     Self::pass(&self.programs[4], rt[11], &[("_MainTex", tex[8]), ("_ComposeRT", tex[8])], true, &mut self.profiler, 5, None)?;
@@ -1021,39 +1354,45 @@ impl EffectRenderer {
                 }
             }
             if active || ready || hover_visible {
-                Self::pass(
-                    &self.mask,
-                    rt[15],
-                    &[("Active", tex[8]), ("Ready", tex[9]), ("Normal", tex[2]), ("Subtract", tex[7])],
-                    true,
-                    &mut self.profiler,
-                    7,
-                    None,
-                )?;
-                Self::pass(
-                    if low && precise { &self.effect } else { &self.fused_effect },
-                    rt[16],
-                    &[("Edge", tex[11]), ("Glow", tex[glow]), ("Hover", tex[14])],
-                    true,
-                    &mut self.profiler,
-                    7,
-                    None,
-                )?;
+                if !(precise && reuse_groups[..4].iter().all(|v| *v)) {
+                    Self::pass(
+                        &self.mask,
+                        rt[15],
+                        &[("Active", tex[8]), ("Ready", tex[9]), ("Normal", tex[2]), ("Subtract", tex[7])],
+                        true,
+                        &mut self.profiler,
+                        7,
+                        None,
+                    )?;
+                }
+                if !(reuse_precise && !hover_visible && !self.cached_hover) {
+                    Self::pass(
+                        if precise { &self.effect } else { &self.fused_effect },
+                        rt[16],
+                        &[("Edge", tex[11]), ("Glow", tex[glow]), ("Hover", tex[14])],
+                        true,
+                        &mut self.profiler,
+                        7,
+                        None,
+                    )?;
+                }
             }
             if disabled {
                 if self.geometry[5].is_empty() {
                     tex[20] = tex[4];
                 } else {
                     tex[20] = rt[20].texture;
-                    Self::pass(
-                        &self.programs[3],
-                        rt[20],
-                        &[("_DisabledNormalBlockRT", tex[4]), ("_DisabledSubtractBlockRT", tex[10])],
-                        true,
-                        &mut self.profiler,
-                        3,
-                        None,
-                    )?;
+                    if !(reuse_groups[4] && reuse_groups[5]) {
+                        Self::pass(
+                            &self.programs[3],
+                            rt[20],
+                            &[("_DisabledNormalBlockRT", tex[4]), ("_DisabledSubtractBlockRT", tex[10])],
+                            true,
+                            &mut self.profiler,
+                            3,
+                            None,
+                        )?;
+                    }
                 }
             }
             if (active || hover_visible) && !res.config.noise_area.remove_distortion {
@@ -1098,10 +1437,10 @@ impl EffectRenderer {
                 };
                 let pr = variant.map_or(&self.programs[7], |i| &self.variants[i]);
                 pr.v4("_BlockTime", vec4(t / 20., t, t * 2., t * 3.));
-                pr.v4("_ScreenParams", vec4(w as f32, h as f32, 1. + 1. / w as f32, 1. + 1. / h as f32));
+                pr.v4("_ScreenParams", vec4(native_size.x, native_size.y, 1. + 1. / native_size.x, 1. + 1. / native_size.y));
                 pr.v4("_ProjectionParams", vec4(1., 0.1, 100., 0.01));
-                pr.v4("_EffectRT_TexelSize", vec4(1. / ew, 1. / eh, ew, eh));
-                pr.v2("_HoverSize", vec2(rt[14].texture.width(), rt[14].texture.height()));
+                pr.v4("_EffectRT_TexelSize", vec4(1. / canonical_ew, 1. / canonical_eh, canonical_ew, canonical_eh));
+                pr.v2("_HoverSize", vec2(canonical_sizes[14].0 as f32, canonical_sizes[14].1 as f32));
                 pr.f("_RemoveDistortion", if res.config.noise_area.remove_distortion { 1. } else { 0. });
                 pr.f("_TouchPosShine", 1.);
                 pr.material.set_uniform("_TouchPosCount", state.positions.len().min(10) as i32);
@@ -1109,9 +1448,10 @@ impl EffectRenderer {
                     let p = state
                         .positions
                         .get(i)
-                        .map(|p| Self::screen_uv(*p, res, vp, w as f32, h as f32))
+                        .map(|p| Self::screen_uv(*p, res, vp, w as f32, h as f32, projection))
                         .unwrap_or(Vec2::ZERO);
-                    pr.v2(TOUCH_UNIFORMS[i], vec2(p.x * w as f32 / h as f32, p.y));
+                    let p = self.canvas.map_or(p, |c| c.origin + p * c.span);
+                    pr.v2(TOUCH_UNIFORMS[i], vec2(p.x * native_size.x / native_size.y, p.y));
                 }
                 Self::pass(
                     pr,
@@ -1150,6 +1490,13 @@ impl EffectRenderer {
                 self.precise_geometry[i].clone_from(&self.geometry[i]);
             }
         }
+        self.static_cache_valid = result.is_ok();
+        self.cached_hover = hover_visible;
+        if self.static_cache_valid {
+            for i in 0..6 {
+                self.cached_geometry[i].clone_from(&self.geometry[i]);
+            }
+        }
         result
     }
 }
@@ -1164,6 +1511,62 @@ impl Drop for EffectRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn noise_canvas_matches_chart_camera_and_retains_outer_geometry() {
+        use crate::practice_view::PracticeView;
+        for (native, vp) in [(vec2(1920., 1080.), (0, 0, 1920, 1080)), (vec2(2400., 1080.), (240, 0, 1920, 1080))] {
+            let aspect = vp.2 as f32 / vp.3 as f32;
+            let base = Mat4::from_scale(vec3(1., -aspect, 1.));
+            for scale in [5., 25., 50., 100., 200., -50.] {
+                let view = PracticeView {
+                    scale_percent: scale,
+                    center_x: 350.,
+                    center_y: -200.,
+                };
+                let canvas = NoiseCanvas::new(view, vp, native);
+                let (w, h) = canvas.dimensions();
+                assert!(w <= 4096 && h <= 4096 && w as u64 * h as u64 <= 4_194_304);
+                let (cx, cy) = view.center(vp.2 as f32);
+                let actual = Mat4::from_scale(vec3(view.scale(), view.scale(), 1.)) * base * Mat4::from_translation(vec3(-cx, -cy, 0.));
+                for p in [Vec2::ZERO, vec2(7., -3.), vec2(-20., 12.)] {
+                    let uv = block_screen_uv(p, aspect, false, base, vp, native);
+                    let screened = block_screen_uv(p, aspect, false, actual, vp, native);
+                    assert!((canvas.screen(uv) - screened).length() < 2e-5);
+                    let atlas = block_screen_uv(p, aspect, false, canvas.projection(base, vp), (0, 0, w as i32, h as i32), vec2(w as f32, h as f32));
+                    assert!((atlas - canvas.atlas(uv)).length() < 2e-5);
+                    assert!((canvas.screen_to_atlas(screened) - atlas).length() < 2e-5);
+                }
+                for p in [Vec2::ZERO, Vec2::ONE] {
+                    let atlas = canvas.screen_to_atlas(p);
+                    assert!(atlas.x > 0. && atlas.x < 1. && atlas.y > 0. && atlas.y < 1.);
+                }
+            }
+            let canvas = NoiseCanvas::new(
+                PracticeView {
+                    scale_percent: 5.,
+                    ..Default::default()
+                },
+                vp,
+                native,
+            );
+            assert!(canvas.origin.x < -9. && canvas.origin.x + canvas.span.x > 10.);
+        }
+    }
+    #[test]
+    fn canonical_shader_maps_only_framebuffers_and_keeps_noise_coordinates() {
+        let (vert, frag) = canvas_shader(include_str!("shaders/ActiveBlock_program_0.vert"), include_str!("shaders/ActiveBlock_program_0.glsl"));
+        assert!(vert.contains("(texcoord * NoiseDomain.xy + NoiseDomain.zw)"));
+        assert!(vert.contains("vs_TEXCOORD3.xy=vs_TEXCOORD3.xy*NoiseDomain.xy"));
+        for name in ["_SceneColor", "_MaskRT", "_EffectRT"] {
+            assert!(frag.contains(&format!("noiseSample({name},")));
+            assert!(!frag.contains(&format!("texture2D({name},")));
+        }
+        for name in ["_DisplaceMap", "_SparkMap", "_NoiseMap"] {
+            assert!(frag.contains(&format!("texture2D({name},")));
+        }
+        assert_eq!(canvas_shader(VERT, SPRITE), (VERT.to_owned(), SPRITE.to_owned()));
+    }
+
     #[test]
     fn microscopic_duplicate_edges_do_not_cut_away_valid_polygons() {
         let poly = vec![vec2(0., 0.), vec2(1., 0.), vec2(1., 1.), vec2(1. - 1e-7, 1.), vec2(0., 1.)];
@@ -1318,5 +1721,80 @@ mod tests {
             assert_eq!(bound, declared);
             assert!(displacement.is_some() || !bound.contains("_DisplaceMap"));
         }
+    }
+}
+
+#[cfg(test)]
+mod camera_tests {
+    use super::*;
+    #[test]
+    fn zoom_and_pan_follow_the_chart_camera() {
+        let aspect = 2.;
+        let vp = (100, 50, 800, 400);
+        let target = vec2(1000., 500.);
+        let point = vec2(2., 1.);
+        let neutral = Mat4::from_scale(vec3(1., -aspect, 1.));
+        let center = block_screen_uv(Vec2::ZERO, aspect, false, neutral, vp, target);
+        let base = block_screen_uv(point, aspect, false, neutral, vp, target);
+        for scale in [0.05, 0.5, 1., 2., 5., -1.] {
+            let camera = Camera2D {
+                zoom: vec2(scale, -aspect * scale),
+                target: vec2(0.1, -0.2),
+                ..Default::default()
+            };
+            let actual = block_screen_uv(point, aspect, false, camera.matrix(), vp, target);
+            let pan = vec2(-0.1 * 0.5 * vp.2 as f32 / target.x, -0.2 * aspect * 0.5 * vp.3 as f32 / target.y);
+            let expected = center + (base - center + pan) * scale;
+            assert!((actual - expected).length() < 1e-5, "scale={scale}: {actual:?} != {expected:?}");
+        }
+    }
+    #[test]
+    fn mirror_matches_note_reflection_and_keeps_viewport_offsets() {
+        let projection = Mat4::from_scale(vec3(2., -4., 1.));
+        let vp = (100, 50, 800, 400);
+        let size = vec2(1000., 500.);
+        let a = block_screen_uv(vec2(2., 1.), 2., false, projection, vp, size);
+        let b = block_screen_uv(vec2(2., 1.), 2., true, projection, vp, size);
+        assert!((a.x + b.x - 1.).abs() < 1e-6);
+        assert!((a.y - b.y).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod static_cache_tests {
+    use super::*;
+    #[test]
+    fn only_glow_is_downsampled_with_precise_edges() {
+        for (w, h) in [(1920, 1080), (1, 1), (1919, 1079)] {
+            let sizes = target_sizes(w, h, true, false);
+            assert_eq!(sizes[8], (w, h));
+            assert_eq!(sizes[11], (w, h));
+            assert_eq!(sizes[16], (w, h));
+            assert_eq!(sizes[12], ((w / 2).max(1), (h / 2).max(1)));
+            assert_eq!(sizes[12], sizes[13]);
+        }
+    }
+    #[test]
+    fn mask_cache_invalidates_on_moves_phase_changes_fades_and_failures() {
+        let mut old: [Vec<ScreenQuad>; 6] = std::array::from_fn(|_| Vec::new());
+        old[0].push(ScreenQuad {
+            points: [Vec2::ZERO; 4],
+            color: WHITE,
+        });
+        assert_eq!(reusable_geometry(false, &old, &old), [false; 6]);
+        assert_eq!(reusable_geometry(true, &old, &old), [true; 6]);
+        let mut next = old.clone();
+        next[0][0].points[0].x += 0.01;
+        assert!(!reusable_geometry(true, &old, &next)[0]);
+        next = old.clone();
+        next[2] = next[0].clone();
+        next[0].clear();
+        let reuse = reusable_geometry(true, &old, &next);
+        assert!(!reuse[0] && !reuse[2]); // Do not keep active pixels in the ready phase.
+        old = next.clone();
+        next[2][0].color.a = 0.5;
+        assert!(!reusable_geometry(true, &old, &next)[2]);
+        next[2].clear();
+        assert!(!reusable_geometry(true, &old, &next)[2]);
     }
 }

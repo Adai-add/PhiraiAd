@@ -18,6 +18,16 @@ use sasa::{AudioClip, AudioManager, Music, MusicParams};
 use serde::Deserialize;
 use std::{cell::RefCell, ops::DerefMut};
 
+fn proceed_rect(top: f32) -> Rect {
+    Rect::new(0.96 - 0.25, top - 0.04 - 0.10, 0.25, 0.10)
+}
+fn replay_save_rect(top: f32) -> Rect {
+    let width = 0.31 * 0.85;
+    let height = 0.07 * 0.85;
+    let proceed = proceed_rect(top);
+    Rect::new(proceed.right() - width, proceed.y - 0.04 - height, width, height)
+}
+
 #[derive(Deserialize)]
 pub struct RecordUpdateState {
     pub best: bool,
@@ -60,6 +70,8 @@ pub struct EndingScene {
     btn_proceed: DRectButton,
     btn_detail: RectButton,
     detail_mode: bool,
+    replay: Option<crate::replay::Payload>,
+    replay_saved: bool,
 
     tr_start: f32,
 
@@ -67,6 +79,11 @@ pub struct EndingScene {
 }
 
 impl EndingScene {
+    pub fn with_replay(mut self, replay: Option<crate::replay::Payload>) -> Self {
+        self.replay = replay;
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         background: SafeTexture,
@@ -170,6 +187,8 @@ impl EndingScene {
             record_data,
             best_record,
             detail_mode: false,
+            replay: None,
+            replay_saved: false,
 
             btn_retry: DRectButton::new(),
             btn_proceed: DRectButton::new(),
@@ -235,6 +254,7 @@ impl Scene for EndingScene {
     }
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
+        crate::replay::poll_saves();
         self.audio.recover_if_needed()?;
         if tm.now() >= 0. && self.target.is_none() && self.bgm.paused() {
             self.bgm.play()?;
@@ -306,14 +326,20 @@ impl Scene for EndingScene {
             let br = Rect::new(-1., y, 2., 0.34);
             ui.fill_rect(br, (c, (-1., y), Color { a: 0.1, ..c }, (1., y + 0.3)));
 
-            let r = ui
-                .text(tl!("detail"))
-                .pos(1. - 0.02, br.bottom() + 0.02)
-                .anchor(1., 0.)
-                .size(0.5)
-                .color(if self.detail_mode { semi_white(0.4) } else { WHITE })
-                .draw_using(&BOLD_FONT);
-            self.btn_detail.set(ui, r.feather(0.02));
+            if self.result.custom_counts.is_empty() {
+                let r = ui
+                    .text(tl!("detail"))
+                    .pos(1. - 0.02, br.bottom() + 0.02)
+                    .anchor(1., 0.)
+                    .size(0.5)
+                    .color(if self.detail_mode { semi_white(0.4) } else { WHITE })
+                    .draw_using(&BOLD_FONT);
+                self.btn_detail.set(ui, r.feather(0.02));
+            } else {
+                // Custom results intentionally show merged categories, not
+                // the original four-row early/late detail toggle.
+                self.btn_detail = RectButton::new();
+            }
 
             let res = &self.result;
 
@@ -431,31 +457,48 @@ impl Scene for EndingScene {
             let mut x = -0.26 + (1.2 - y) / 1.9 * 0.4;
             let lf = x;
             let s = 0.64;
-            for (id, title) in ["PERFECT", "GOOD", "BAD", "MISS"].into_iter().enumerate() {
-                ui.text(title)
-                    .pos(x, y)
-                    .anchor(1., 0.)
-                    .color(semi_white(0.6))
-                    .size(s)
-                    .draw_using(&BOLD_FONT);
-                let r = if self.detail_mode && id != 3 {
-                    let r = ui
-                        .text(format!("-{}", res.early_kind[id]))
-                        .pos(x + 0.03, y)
-                        .size(s)
-                        .color(Color::from_hex_rgb(0x81d4fa))
+            if !res.custom_counts.is_empty() {
+                // Keep six merged categories within the original four-row area.
+                let factor = 4. / res.custom_counts.len() as f32;
+                for (title, count) in &res.custom_counts {
+                    ui.text(title)
+                        .pos(x, y)
+                        .anchor(1., 0.)
+                        .color(semi_white(0.6))
+                        .size(s * factor)
                         .draw_using(&BOLD_FONT);
-                    ui.text(format!("+{}", res.late_kind[id]))
-                        .pos(r.right() + 0.01, y)
+                    let r = ui.text(count.to_string()).pos(x + 0.06, y).size(s * factor).draw_using(&BOLD_FONT);
+                    let dy = r.h + 0.03 * factor;
+                    y += dy;
+                    x -= dy / 1.9 * 0.4;
+                }
+            } else {
+                for (id, title) in ["PERFECT", "GOOD", "BAD", "MISS"].into_iter().enumerate() {
+                    ui.text(title)
+                        .pos(x, y)
+                        .anchor(1., 0.)
+                        .color(semi_white(0.6))
                         .size(s)
-                        .color(Color::from_hex_rgb(0xffab91))
-                        .draw_using(&BOLD_FONT)
-                } else {
-                    ui.text(res.counts[id].to_string()).pos(x + 0.06, y).size(s).draw_using(&BOLD_FONT)
-                };
-                let dy = r.h + 0.03;
-                y += dy;
-                x -= dy / 1.9 * 0.4;
+                        .draw_using(&BOLD_FONT);
+                    let r = if self.detail_mode && id != 3 {
+                        let r = ui
+                            .text(format!("-{}", res.early_kind[id]))
+                            .pos(x + 0.03, y)
+                            .size(s)
+                            .color(Color::from_hex_rgb(0x81d4fa))
+                            .draw_using(&BOLD_FONT);
+                        ui.text(format!("+{}", res.late_kind[id]))
+                            .pos(r.right() + 0.01, y)
+                            .size(s)
+                            .color(Color::from_hex_rgb(0xffab91))
+                            .draw_using(&BOLD_FONT)
+                    } else {
+                        ui.text(res.counts[id].to_string()).pos(x + 0.06, y).size(s).draw_using(&BOLD_FONT)
+                    };
+                    let dy = r.h + 0.03;
+                    y += dy;
+                    x -= dy / 1.9 * 0.4;
+                }
             }
 
             let p = ran(t, 0.8, 1.8);
@@ -539,9 +582,7 @@ impl Scene for EndingScene {
             };
             ui.text(text).pos(r.right() + 0.03, y).size(s).draw_using(&BOLD_FONT);
 
-            let mut r = Rect::new(0.96, ui.top - 0.04, 0.25, 0.1);
-            r.x -= r.w;
-            r.y -= r.h;
+            let mut r = proceed_rect(ui.top);
             self.btn_proceed.render_shadow(ui, r, t, |ui, path| {
                 ui.fill_path(&path, Color::from_hex_rgb(0x3f51b5));
                 let ir = Rect::new(r.x + 0.05, r.center().y, 0., 0.).feather(0.03);
@@ -706,6 +747,31 @@ impl Scene for EndingScene {
             ui.fill_rect(r, semi_black(alpha));
         }
 
+        if self.replay.is_some() || self.replay_saved {
+            let previous_viewport = unsafe { get_internal_gl() }.quad_gl.get_viewport();
+            push_camera_state();
+            let mut replay_camera = ui.camera();
+            replay_camera.render_target = self.target;
+            set_camera(&replay_camera);
+            ui.abs_scope(|ui| {
+                ui.screen_touch_scope(|ui| {
+                    if ui.button_with_size(
+                        "ending_save_replay",
+                        replay_save_rect(ui.top),
+                        if self.replay_saved { "回放已保存" } else { "保存本次回放" },
+                        0.42 * 0.85,
+                    ) && !self.replay_saved
+                    {
+                        if let Some(payload) = self.replay.take() {
+                            crate::replay::save_background(payload);
+                            self.replay_saved = true;
+                        }
+                    }
+                })
+            });
+            pop_camera_state();
+            unsafe { get_internal_gl() }.quad_gl.viewport(previous_viewport);
+        }
         Ok(())
     }
 
@@ -727,6 +793,21 @@ impl Scene for EndingScene {
                 }
             }
             _ => unreachable!(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod replay_button_layout_tests {
+    #[test]
+    fn save_button_is_smaller_above_and_right_aligned_with_continue() {
+        for top in [0.45, 0.5625, 0.75] {
+            let save = super::replay_save_rect(top);
+            let proceed = super::proceed_rect(top);
+            assert!((save.w - 0.31 * 0.85).abs() < 1e-6);
+            assert!((save.h - 0.07 * 0.85).abs() < 1e-6);
+            assert!((save.right() - proceed.right()).abs() < 1e-6);
+            assert!((proceed.y - save.bottom() - 0.04).abs() < 1e-6);
         }
     }
 }
