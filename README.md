@@ -28,7 +28,7 @@ PhiraiAd 在原版 Phira 的基础上增加或修改了多项练习、判定和�
 
 ## 适配版本
 
-当前v1.3.0版本适配安卓、ios (ios的ipa文件需要自行签名按照，不计划上AppleStore)。
+当前v1.4.0版本适配安卓、windows、ios (ios的ipa文件需要自行签名按照，不计划上AppleStore)。
 
 ## 下载
 
