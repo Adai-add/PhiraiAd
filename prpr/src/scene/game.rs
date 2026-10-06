@@ -575,6 +575,23 @@ impl GameScene {
             }
         }
     }
+    /// The particle renderer needs at least one particle on Windows before its
+    /// first draw. Normal gameplay does this during State::Starting, but replay
+    /// playback bypasses GameScene::update and otherwise only initializes the
+    /// renderer when the first judgement effect is emitted.
+    fn warm_up_windows_particles(&mut self) {
+        #[cfg(target_os = "windows")]
+        {
+            let emitter_config = self.res.emitter.emitter.config.clone();
+            let emitter_square_config = self.res.emitter.emitter_square.config.clone();
+            self.res.emitter.emitter.config.size = 0.0;
+            self.res.emitter.emitter_square.config.size = 0.0;
+            self.res.emitter.emitter.emit(vec2(0.0, 0.0), 1);
+            self.res.emitter.emitter_square.emit(vec2(0.0, 0.0), 1);
+            self.res.emitter.emitter.config = emitter_config;
+            self.res.emitter.emitter_square.config = emitter_square_config;
+        }
+    }
     pub fn prepare_replay(&mut self) {
         self.replay = None;
         self.res.replay_capture = false;
@@ -609,6 +626,13 @@ impl GameScene {
         self.res.emitter.emitter.clear();
         self.res.emitter.emitter_square.clear();
         self.bad_notes.clear();
+        // Replay restore runs before the first rendered frame and clears the
+        // dummy particles installed by prepare_replay(). On Windows an empty
+        // particle instance buffer corrupts subsequent GL drawing until the
+        // first real judgement particle is emitted. Re-seed the invisible
+        // particles after every replay clear so the very next draw has a
+        // valid instance buffer, including after seeking back to the start.
+        self.warm_up_windows_particles();
     }
     pub fn emit_replay_effects(&mut self, frame: &crate::replay::Frame, sounds: bool) {
         for fx in &frame.fx {
@@ -1879,18 +1903,7 @@ impl Scene for GameScene {
                     }
                     tm.now()
                 } else {
-                    #[cfg(target_os = "windows")]
-                    {
-                        // wtf bro. why must particles exist on Windows?
-                        let emitter_config = self.res.emitter.emitter.config.clone();
-                        let emitter_square_config = self.res.emitter.emitter_square.config.clone();
-                        self.res.emitter.emitter.config.size = 0.0;
-                        self.res.emitter.emitter_square.config.size = 0.0;
-                        self.res.emitter.emitter.emit(vec2(0.0, 0.0), 1);
-                        self.res.emitter.emitter_square.emit(vec2(0.0, 0.0), 1);
-                        self.res.emitter.emitter.config = emitter_config;
-                        self.res.emitter.emitter_square.config = emitter_square_config;
-                    }
+                    self.warm_up_windows_particles();
                     self.res.alpha = (1. - (1. - time / Self::BEFORE_TIME).powi(3)) as f32;
                     if self.mode == GameMode::Exercise {
                         self.exercise_range.start

@@ -327,6 +327,13 @@ async fn the_main() -> Result<()> {
 
     log::startup_checkpoint("05 saved data initialization");
     let dir = dir::root()?;
+    #[cfg(target_os = "windows")]
+    {
+        let exe = std::env::current_exe().context("failed to locate PhiraiAd.exe")?;
+        let exe_dir = exe.parent().context("PhiraiAd.exe has no parent directory")?;
+        prpr::replay::set_root_path(exe_dir.join("replay"));
+    }
+    #[cfg(not(target_os = "windows"))]
     prpr::replay::set_root(&dir);
     let mut data: Data = data_guard::load(std::path::Path::new(&dir))?;
     data.init().await?;

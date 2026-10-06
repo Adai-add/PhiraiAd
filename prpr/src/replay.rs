@@ -41,6 +41,13 @@ static SAVES: Lazy<Mutex<Vec<Task<Result<String>>>>> = Lazy::new(|| Mutex::new(V
 pub fn set_root(root: impl AsRef<Path>) {
     *ROOT.lock().unwrap() = Some(root.as_ref().join("replays-v3"));
 }
+
+/// Set the replay storage directory directly instead of appending the legacy
+/// `replays-v3` subdirectory. Desktop frontends use this when replay files are
+/// intentionally kept next to the executable.
+pub fn set_root_path(root: impl AsRef<Path>) {
+    *ROOT.lock().unwrap() = Some(root.as_ref().to_path_buf());
+}
 fn root() -> Result<PathBuf> {
     ROOT.lock().unwrap().clone().context("回放目录尚未初始化")
 }
@@ -787,6 +794,10 @@ pub fn save(mut payload: Payload) -> Result<String> {
     let mut tape_file = fs::File::create(temp.path().join("tape.zip"))?;
     tape_file.write_all(&bytes)?;
     tape_file.sync_all()?;
+    // Windows refuses to rename a directory while a file inside it still has
+    // an open handle. Close tape.zip before publishing the temporary replay
+    // directory, otherwise fs::rename below fails with ERROR_ACCESS_DENIED (5).
+    drop(tape_file);
     atomic_json(&temp.path().join("manifest.json"), &payload.manifest)?;
     // Publish the chart before the referencing replay. An interrupted save can
     // leave an unused chart, never a replay pointing to an unpublished chart.
