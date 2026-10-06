@@ -59,6 +59,9 @@ pub struct MainScene {
     state: SharedState,
 
     bgm: Option<Music>,
+    menu_music_default_task: Option<Task<Result<AudioClip>>>,
+    menu_music_custom: bool,
+    menu_music_volume: f32,
 
     background: SafeTexture,
     btn_back: RectButton,
@@ -105,6 +108,7 @@ impl MainScene {
     pub async fn new(fallback: FontArc) -> Result<Self> {
         prpr::log::startup_checkpoint("08 UI sounds and textures");
         Self::init().await?;
+        crate::custom_resources::initialize();
 
         prpr::log::startup_checkpoint("09 BGM read/decode/audio");
         let bgm = {
@@ -159,6 +163,9 @@ impl MainScene {
             state,
 
             bgm,
+            menu_music_default_task: None,
+            menu_music_custom: false,
+            menu_music_volume: f32::NAN,
 
             background: TEX_BACKGROUND.with(|it| it.borrow().clone().unwrap()),
             btn_back: RectButton::new(),
@@ -337,6 +344,35 @@ impl Scene for MainScene {
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
         prpr::replay::poll_saves();
+        crate::custom_resources::tick();
+        let (mut clip, reset) = crate::custom_resources::take_music();
+        if clip.is_some() { self.menu_music_default_task = None; self.menu_music_custom = true; }
+        if reset {
+            self.menu_music_default_task = Some(Task::new(async {
+                let bytes = crate::load_res("res/bgm").await?;
+                tokio::task::spawn_blocking(move || AudioClip::new(bytes)).await.context("加载默认音乐失败")?
+            }));
+        }
+        if let Some(task) = &mut self.menu_music_default_task {
+            if let Some(result) = task.take() {
+                self.menu_music_default_task = None;
+                match result { Ok(default) => { clip = Some(default); self.menu_music_custom = false; }, Err(error) => show_error(error) }
+            }
+        }
+        if let Some(clip) = clip {
+            let replacement = UI_AUDIO.with(|it| it.borrow_mut().create_music(clip, sasa::MusicParams {
+                amplifier: get_data().config.volume_bgm * crate::custom_resources::finite(get_data().menu_resources.volume, 1., 0., 2.),
+                loop_mix_time: if self.menu_music_custom { 0. } else { 5.46 }, command_buffer_size: 64, ..Default::default()
+            }));
+            match replacement {
+                Ok(mut replacement) => {
+                    replacement.set_low_pass(if self.pages.len() > 1 { LOW_PASS } else { 0. })?;
+                    if self.pages.last().unwrap().can_play_bgm() { replacement.play()?; }
+                    if let Some(old) = &mut self.bgm { old.pause()?; }
+                    self.bgm = Some(replacement); self.menu_music_volume = f32::NAN;
+                }, Err(error) => show_error(error.into()),
+            }
+        }
         crate::ai_service::tick();
         UI_AUDIO.with(|it| it.borrow_mut().recover_if_needed())?;
         if get_data().config.mp_enabled {
@@ -382,8 +418,10 @@ impl Scene for MainScene {
             self.pages.last_mut().unwrap().enter(s)?;
         }
         if let Some(bgm) = &mut self.bgm {
-            if BGM_VOLUME_UPDATED.fetch_and(false, Ordering::Relaxed) {
-                bgm.set_amplifier(get_data().config.volume_bgm)?;
+            let volume = get_data().config.volume_bgm * crate::custom_resources::finite(get_data().menu_resources.volume, 1., 0., 2.);
+            if BGM_VOLUME_UPDATED.fetch_and(false, Ordering::Relaxed) || volume != self.menu_music_volume {
+                bgm.set_amplifier(volume)?;
+                self.menu_music_volume = volume;
             }
         }
         if let Some(task) = &mut self.import_task {
@@ -408,6 +446,7 @@ impl Scene for MainScene {
         }
         if let Some((id, file)) = take_file() {
             match id.as_str() {
+                "_menu_music" | "_menu_background" | "_menu_character" => { crate::custom_resources::receive(&id, file); },
                 "_bn_import_image" => crate::bn_import::receive_file(file),
                 "_custom_font" => match crate::custom_font::import(&file) {
                     Ok(()) => {
@@ -769,7 +808,7 @@ impl Scene for MainScene {
     fn render(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
         set_camera(&ui.camera());
 
-        if let Some(material) = &*STRIPE_MATERIAL {
+        if let Some(material) = get_data().menu_resources.stripes.then(|| STRIPE_MATERIAL.as_ref()).flatten() {
             material.set_uniform("time", ((tm.real_time() * 0.025) % (std::f64::consts::PI * 2.)) as f32);
             gl_use_material(*material);
         } else {
@@ -777,7 +816,8 @@ impl Scene for MainScene {
             // configurations), fall back to the default material instead of panicking.
             gl_use_default_material();
         }
-        ui.fill_rect(ui.screen_rect(), (*self.background, ui.screen_rect()));
+        clear_background(BLACK);
+        crate::custom_resources::draw_background(ui, &self.background);
         gl_use_default_material();
 
         let s = &mut self.state;

@@ -376,21 +376,41 @@ impl ParticleEmitter {
     }
 }
 
-type NoteBufferMap = BTreeMap<(i8, GLuint), Vec<(Vec<Vertex>, Vec<u16>)>>;
+#[derive(Default)]
+struct NoteBatch {
+    meshes: Vec<(Vec<Vertex>, Vec<u16>)>,
+    current: usize,
+}
+impl NoteBatch {
+    fn clear_after_draw(&mut self) {
+        for mesh in self.meshes.iter_mut().take(self.current + 1) {
+            mesh.0.clear();
+            mesh.1.clear();
+        }
+        self.current = 0;
+    }
+}
+type NoteBufferMap = BTreeMap<(i8, GLuint), NoteBatch>;
 
 #[derive(Default)]
 pub struct NoteBuffer(NoteBufferMap);
 
 impl NoteBuffer {
     pub fn push(&mut self, key: (i8, GLuint), vertices: [Vertex; 4]) {
-        let meshes = self.0.entry(key).or_default();
-        if meshes.last().is_none_or(|it| it.0.len() + 4 > MAX_SIZE * 4) {
-            meshes.push(Default::default());
+        let batch = self.0.entry(key).or_default();
+        if batch.meshes.is_empty() {
+            batch.meshes.push(Default::default());
         }
-        let last = meshes.last_mut().unwrap();
-        let i = last.0.len() as u16;
-        last.0.extend_from_slice(&vertices);
-        last.1.extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
+        if batch.meshes[batch.current].0.len() + 4 > MAX_SIZE * 4 {
+            batch.current += 1;
+            if batch.current == batch.meshes.len() {
+                batch.meshes.push(Default::default());
+            }
+        }
+        let mesh = &mut batch.meshes[batch.current];
+        let i = mesh.0.len() as u16;
+        mesh.0.extend_from_slice(&vertices);
+        mesh.1.extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
     }
 
     pub fn draw_all(&mut self) {
@@ -398,11 +418,17 @@ impl NoteBuffer {
         gl.flush();
         let gl = gl.quad_gl;
         gl.draw_mode(DrawMode::Triangles);
-        for ((_, tex_id), meshes) in std::mem::take(&mut self.0).into_iter() {
-            gl.texture(Some(Texture2D::from_miniquad_texture(unsafe { Texture::from_raw_id(tex_id, miniquad::TextureFormat::RGBA8) })));
-            for mesh in meshes {
+        // Keep both the sorted texture groups and mesh capacities between draws.
+        // geometry() copies into the renderer; clearing our input is safe.
+        for ((_, tex_id), batch) in &mut self.0 {
+            if batch.meshes.first().is_none_or(|mesh| mesh.0.is_empty()) {
+                continue;
+            }
+            gl.texture(Some(Texture2D::from_miniquad_texture(unsafe { Texture::from_raw_id(*tex_id, miniquad::TextureFormat::RGBA8) })));
+            for mesh in batch.meshes.iter().take(batch.current + 1) {
                 gl.geometry(&mesh.0, &mesh.1);
             }
+            batch.clear_after_draw();
         }
     }
 }
@@ -696,35 +722,29 @@ impl Resource {
     }
 
     /// Visibility tests use the same camera view as the rendered chart.
+    #[inline]
     pub fn chart_view_point(&self, pt: Point, inverse: bool) -> Point {
-        if self.noise_capture {
-            // Native canvas camera includes only the expanded canvas framing,
-            // not the user's practice zoom. Culling must retain its whole area.
-            let cx = if self.config.flip_x() {
-                -self.camera.target.x
-            } else {
-                self.camera.target.x
-            };
-            let cy = self.camera.target.y;
-            let sx = self.camera.zoom.x;
-            let sy = -self.camera.zoom.y / self.aspect_ratio;
-            return if inverse {
-                Point::new(pt.x / sx + cx, pt.y / sy - cy)
-            } else {
-                Point::new((pt.x - cx) * sx, (pt.y + cy) * sy)
-            };
-        }
-        if self.chart_post_view {
-            return pt;
-        }
-        let width = self.camera.viewport.map_or(self.last_vp.2, |vp| vp.2).max(1) as f32;
-        let (cx, cy) = self.practice_view.center(width);
-        let cx = if self.config.flip_x() { -cx } else { cx };
-        let scale = self.practice_view.scale();
-        if inverse {
-            Point::new(pt.x / scale + cx, pt.y / scale - cy)
+        self.chart_view_points([pt], inverse)[0]
+    }
+
+    /// Resolve camera parameters once for a sprite or a line's four corners.
+    pub fn chart_view_points<const N: usize>(&self, points: [Point; N], inverse: bool) -> [Point; N] {
+        let (cx, cy, sx, sy) = if self.noise_capture {
+            let cx = if self.config.flip_x() { -self.camera.target.x } else { self.camera.target.x };
+            (cx, self.camera.target.y, self.camera.zoom.x, -self.camera.zoom.y / self.aspect_ratio)
+        } else if self.chart_post_view {
+            return points;
         } else {
-            Point::new((pt.x - cx) * scale, (pt.y + cy) * scale)
+            let width = self.camera.viewport.map_or(self.last_vp.2, |vp| vp.2).max(1) as f32;
+            let (cx, cy) = self.practice_view.center(width);
+            let cx = if self.config.flip_x() { -cx } else { cx };
+            let scale = self.practice_view.scale();
+            (cx, cy, scale, scale)
+        };
+        if inverse {
+            points.map(|pt| Point::new(pt.x / sx + cx, pt.y / sy - cy))
+        } else {
+            points.map(|pt| Point::new((pt.x - cx) * sx, (pt.y + cy) * sy))
         }
     }
 
@@ -734,6 +754,12 @@ impl Resource {
 
     pub fn screen_to_world(&self, pt: Point) -> Point {
         self.model_stack.last().unwrap().try_inverse().unwrap().transform_point(&pt)
+    }
+
+    /// Transform several points under one model without repeating its inverse.
+    pub fn screen_points_to_world<const N: usize>(&self, points: [Point; N]) -> [Point; N] {
+        let inverse = self.model_stack.last().unwrap().try_inverse().unwrap();
+        points.map(|point| inverse.transform_point(&point))
     }
 
     #[inline]
@@ -754,5 +780,37 @@ impl Resource {
         unsafe { get_internal_gl() }.quad_gl.push_model_matrix(nalgebra_to_glm(mat));
         f(self);
         unsafe { get_internal_gl() }.quad_gl.pop_model_matrix();
+    }
+}
+
+#[cfg(test)]
+mod render_buffer_reuse_tests {
+    use super::*;
+
+    #[test]
+    fn reused_meshes_keep_capacity_and_do_not_draw_old_vertices() {
+        let mut buffer = NoteBuffer::default();
+        let key = (0, 7);
+        let vertices = [Vertex::new(0., 0., 0., 0., 0., WHITE); 4];
+        for _ in 0..MAX_SIZE + 1 { buffer.push(key, vertices); }
+        let batch = buffer.0.get_mut(&key).unwrap();
+        assert_eq!(batch.current, 1);
+        assert_eq!(batch.meshes[0].0.len(), MAX_SIZE * 4);
+        assert_eq!(batch.meshes[1].0.len(), 4);
+        let capacities: Vec<_> = batch.meshes.iter().map(|m| (m.0.capacity(), m.1.capacity())).collect();
+        batch.clear_after_draw();
+        for _ in 0..2 { buffer.push(key, vertices); }
+        let batch = buffer.0.get_mut(&key).unwrap();
+        assert_eq!(batch.current, 0);
+        assert_eq!(batch.meshes[0].0.len(), 8);
+        assert_eq!(batch.meshes[0].1, [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]);
+        assert!(batch.meshes[1].0.is_empty());
+        assert_eq!(capacities, batch.meshes.iter().map(|m| (m.0.capacity(), m.1.capacity())).collect::<Vec<_>>());
+        batch.clear_after_draw();
+        for _ in 0..MAX_SIZE * 2 { buffer.push(key, vertices); }
+        let batch = buffer.0.get(&key).unwrap();
+        assert_eq!(batch.meshes.len(), 2);
+        assert_eq!(batch.current, 1);
+        assert_eq!(batch.meshes[1].1[0..6], [0, 1, 2, 0, 2, 3]);
     }
 }

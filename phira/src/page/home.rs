@@ -689,7 +689,9 @@ impl Page for HomePage {
                     Ok(image) => {
                         self.char_appear_p.goto(1., t, 0.5);
                         let tex: SafeTexture = image.into();
-                        self.char_illu = Some(tex.with_mipmap());
+                        let tex = tex.with_mipmap();
+                        crate::custom_resources::set_default_character(tex.clone());
+                        self.char_illu = Some(tex);
                     }
                 }
                 self.char_illu_task = None;
@@ -727,7 +729,9 @@ impl Page for HomePage {
         let cp = self.char_screen_p.now(rt);
         s.render_fader(ui, |ui| {
             let r = Rect::new(-1. + 0.14 * cp, -ui.top + 0.12, 1., 1.7);
-            if let Some(illu) = &self.char_illu {
+            if crate::custom_resources::draw_character(ui, 0.14 * cp) {
+                // The same drawing function is used by the resource editor.
+            } else if let Some(illu) = &self.char_illu {
                 let p = self.char_appear_p.now(t);
                 let (ox, oy, ow, oh) = self.character.illu_adjust;
                 let r = Rect::new(r.x + ox, r.y + (1. - p) * 0.05 + oy, r.w + ow, r.h + oh);

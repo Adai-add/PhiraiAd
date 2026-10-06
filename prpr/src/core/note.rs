@@ -82,7 +82,7 @@ fn draw_tex(res: &Resource, texture: Texture2D, order: i8, x: f32, y: f32, color
 }
 fn draw_tex_pts(res: &Resource, texture: Texture2D, order: i8, p: [Point; 4], color: Color, params: DrawTextureParams) {
     let mut p = p.map(|it| res.world_to_screen(it));
-    let visible = p.map(|point| res.chart_view_point(point, false));
+    let visible = res.chart_view_points(p, false);
     if visible[0].x.min(visible[1].x.min(visible[2].x.min(visible[3].x))) > 1.
         || visible[0].x.max(visible[1].x.max(visible[2].x.max(visible[3].x))) < -1.
         || visible[0].y.min(visible[1].y.min(visible[2].y.min(visible[3].y))) > 1.

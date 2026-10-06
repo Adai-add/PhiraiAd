@@ -1,5 +1,6 @@
 pub mod coll;
 mod custom_judgement;
+mod custom_resources;
 pub mod timing_editor;
 pub use coll::CollectionPage;
 
@@ -378,7 +379,7 @@ impl Fader {
                     + 0.012;
             }
             if s == "PhiraiAd" {
-                ui.text("v1.3.0")
+                ui.text("v1.4.0")
                     .pos(x + 0.01, tp + h - 0.027)
                     .anchor(0., 1.)
                     .color(semi_white(0.4))

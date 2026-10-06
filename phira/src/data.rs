@@ -105,6 +105,23 @@ fn default_anys_gateway() -> String {
     "https://anys.mivik.moe".to_string()
 }
 
+/// UI expansion is persisted separately from gameplay switches.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SettingsExpansionState {
+    pub gameplay: bool,
+    pub ranges: bool,
+    pub timing: bool,
+    pub noise: bool,
+    pub resources: bool,
+    pub reports: bool,
+}
+impl Default for SettingsExpansionState {
+    fn default() -> Self {
+        Self { gameplay: true, ranges: true, timing: true, noise: true, resources: false, reports: true }
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Data {
@@ -116,6 +133,8 @@ pub struct Data {
     pub challenge_selection: [Option<SavedChallengeChart>; 3],
     pub challenge_badges: crate::challenge::ChallengeSlots,
     pub config: Config,
+    pub settings_expansion: SettingsExpansionState,
+    pub menu_resources: crate::custom_resources::MenuResources,
     pub message_check_time: Option<DateTime<Utc>>,
     pub language: Option<String>,
     pub theme: usize,

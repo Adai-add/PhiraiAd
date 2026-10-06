@@ -251,11 +251,11 @@ impl JudgeLine {
             .append_translation(&self.fetch_pos(res, lines))
     }
 
-    pub fn render(&self, ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &mut BpmList, settings: &ChartSettings, id: usize) {
+    pub fn render(&self, ui: &mut Ui, res: &mut Resource, lines: &[JudgeLine], bpm_list: &mut BpmList, settings: &ChartSettings, id: usize, transform: Option<Matrix>) {
         let alpha = self.object.alpha.now_opt().unwrap_or(1.0) * res.alpha;
         let color = self.color.now_opt();
         let line_scaled = (self.object.scale.1.now() - 1.).abs() > 1e-4;
-        res.with_model(self.now_transform(res, lines), |res| {
+        res.with_model(transform.unwrap_or_else(|| self.now_transform(res, lines)), |res| {
             if res.config.chart_debug {
                 res.apply_model(|_| {
                     ui.text(id.to_string()).pos(0., -0.01).anchor(0.5, 1.).size(0.8).draw();
@@ -410,30 +410,35 @@ impl JudgeLine {
             // The normal render cache drops judged Tap/Flick/Drag notes before
             // drawing. Sample requested centers independently so the trigger frame
             // still records its exact position, even after the sprite disappeared.
-            let replay_targets: Vec<_> = res
-                .replay_note_targets
-                .iter()
-                .filter_map(|&(line, note)| (!res.noise_capture && line == id as u32).then_some(note))
-                .collect();
-            for note_id in replay_targets {
-                if let Some(note) = self.notes.get(note_id as usize) {
-                    let tag = (id as u32, note_id);
-                    if note.above {
-                        note.capture_replay_center(res, &mut config, tag);
-                    } else {
-                        res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.)), |res| {
+            // Move the set out temporarily: capture needs &mut Resource, so
+            // borrowing its set while iterating would conflict. Taking an empty
+            // replacement does not allocate, and the original capacity is kept.
+            if !res.noise_capture && !res.replay_note_targets.is_empty() {
+                let targets = std::mem::take(&mut res.replay_note_targets);
+                for &(line_id, note_id) in &targets {
+                    if line_id != id as u32 {
+                        continue;
+                    }
+                    if let Some(note) = self.notes.get(note_id as usize) {
+                        let tag = (id as u32, note_id);
+                        if note.above {
                             note.capture_replay_center(res, &mut config, tag);
-                        });
+                        } else {
+                            res.with_model(Matrix::identity().append_nonuniform_scaling(&Vector::new(1., -1.)), |res| {
+                                note.capture_replay_center(res, &mut config, tag);
+                            });
+                        }
                     }
                 }
+                res.replay_note_targets = targets;
             }
             let (vw, vh) = (1.1, 1.);
-            let p = [
-                res.screen_to_world(res.chart_view_point(Point::new(-vw, -vh), true)),
-                res.screen_to_world(res.chart_view_point(Point::new(-vw, vh), true)),
-                res.screen_to_world(res.chart_view_point(Point::new(vw, -vh), true)),
-                res.screen_to_world(res.chart_view_point(Point::new(vw, vh), true)),
-            ];
+            let p = res.screen_points_to_world(res.chart_view_points([
+                Point::new(-vw, -vh),
+                Point::new(-vw, vh),
+                Point::new(vw, -vh),
+                Point::new(vw, vh),
+            ], true));
             let height_above = p[0].y.max(p[1].y.max(p[2].y.max(p[3].y))) * res.aspect_ratio;
             let height_below = -p[0].y.min(p[1].y.min(p[2].y.min(p[3].y))) * res.aspect_ratio;
             let agg = res.config.aggressive;

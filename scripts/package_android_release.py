@@ -198,54 +198,139 @@ def append_manifest_string(chunk, value):
     return bytes(out), new_index, values
 
 
-def patch_manifest_label(data, app_label):
-    """Force the Android application/activity label to a literal manifest string."""
-    data = bytearray(data)
-    offset = struct.unpack_from("<H", data, 2)[0]
-    strings = None
-    label_index = None
-    while offset < len(data):
-        kind, header, size = struct.unpack_from("<HHI", data, offset)
-        if kind == 1:
-            pool, label_index, strings = append_manifest_string(bytes(data[offset:offset + size]), app_label)
-            data[offset:offset + size] = pool
-            size = len(pool)
-            break
-        offset += size
-    if strings is None or label_index is None:
-        raise ValueError("Manifest string pool not found")
-    struct.pack_into("<I", data, 4, len(data))
-
+def _manifest_chunks(data):
     pos = struct.unpack_from("<H", data, 2)[0]
-    resource_ids = []
-    changes = 0
     while pos < len(data):
         kind, header, size = struct.unpack_from("<HHI", data, pos)
         if size < header or size == 0 or pos + size > len(data):
             raise ValueError("Invalid AXML chunk")
+        yield pos, kind, header, size
+        pos += size
+
+
+def _component_role(name, values):
+    """Use stable component/intent metadata, never the old user-visible label."""
+    def detect(text):
+        text = re.sub(r"[^a-z0-9]", "", text.lower())
+        if text in {"res", "resource"} or any(word in text for word in ("respack", "resourcepack", "texturepack", "importresource")):
+            return "respack"
+        if "chart" in text:
+            return "chart"
+        return None
+    # Only the last class-name segment: package names must not select a role.
+    role = detect(name.rsplit(".", 1)[-1])
+    if role:
+        return role
+    roles = {detect(value) for value in values} - {None}
+    if len(roles) == 1:
+        return roles.pop()
+    if len(roles) > 1:
+        raise ValueError("Ambiguous chart/resource-pack Android entry: " + name)
+    # The original Android shell uses ImportActivity for chart import and
+    # accepts */*, so it has neither "chart" in its name nor a ZIP MIME hint.
+    # Prefer explicit metadata above; only this known generic component falls back.
+    if name.rsplit(".", 1)[-1].lower() == "importactivity":
+        return "chart"
+    return None
+
+
+def patch_manifest_label(data, app_label):
+    """Assign launcher/chart/respack labels independently, including old patched APKs."""
+    data = bytearray(data)
+    label_indices = {}
+    strings = None
+    for pos, kind, header, size in _manifest_chunks(data):
+        if kind == 1:
+            pool = bytes(data[pos:pos + size])
+            for role, label in (("app", app_label), ("chart", "导入到" + app_label + "(谱面)"),
+                                ("respack", "导入到" + app_label + "(资源包)")):
+                pool, index, strings = append_manifest_string(pool, label)
+                label_indices[role] = index
+            data[pos:pos + size] = pool
+            break
+    if strings is None:
+        raise ValueError("Manifest string pool not found")
+    struct.pack_into("<I", data, 4, len(data))
+
+    resource_ids = []
+    components = []
+    stack = []
+    android_name = 0x01010003
+    android_ns = "http://schemas.android.com/apk/res/android"
+    label_attr_name = None
+    for pos, kind, header, size in _manifest_chunks(data):
         if kind == 0x0180:
             resource_ids = list(struct.unpack_from(f"<{(size - header) // 4}I", data, pos + header))
+            if ANDROID_ATTR_LABEL in resource_ids:
+                label_attr_name = resource_ids.index(ANDROID_ATTR_LABEL)
         elif kind == 0x0102:
             ext = pos + header
-            element_name_index = struct.unpack_from("<I", data, ext + 4)[0]
-            element_name = strings[element_name_index] if element_name_index < len(strings) else ""
-            # Application is the authoritative app label; explicit activity labels can
-            # override it on launchers, so normalize those too when present.
-            if element_name in {"application", "activity", "activity-alias"}:
-                start, stride, count = struct.unpack_from("<HHH", data, ext + 8)
-                for index in range(count):
-                    attr = ext + start + index * stride
-                    name_index = struct.unpack_from("<I", data, attr + 4)[0]
-                    if name_index < len(resource_ids) and resource_ids[name_index] == ANDROID_ATTR_LABEL:
-                        struct.pack_into("<I", data, attr + 8, label_index)  # rawValue
-                        struct.pack_into("<H", data, attr + 12, 8)
-                        data[attr + 14] = 0
-                        data[attr + 15] = 0x03  # TYPE_STRING
-                        struct.pack_into("<I", data, attr + 16, label_index)
-                        changes += 1
-        pos += size
-    if changes < 1:
-        raise ValueError("No android:label attribute found in application/activity manifest entries")
+            name_index = struct.unpack_from("<I", data, ext + 4)[0]
+            element = strings[name_index]
+            start, stride, count = struct.unpack_from("<HHH", data, ext + 8)
+            if stride < 20 or ext + start + stride * count > pos + size:
+                raise ValueError("Invalid AXML attributes")
+            attributes = []
+            for i in range(count):
+                attr = ext + start + i * stride
+                namespace, attr_name, raw = struct.unpack_from("<III", data, attr)
+                resource = resource_ids[attr_name] if attr_name < len(resource_ids) else 0
+                value_type, value = data[attr + 15], struct.unpack_from("<I", data, attr + 16)[0]
+                text_index = raw if raw != 0xffffffff else value if value_type == 3 else 0xffffffff
+                text = strings[text_index] if text_index < len(strings) else ""
+                attributes.append((attr, resource, text, namespace))
+            current = stack[-1] if stack else None
+            if element in {"application", "activity", "activity-alias"}:
+                component_name = next((text for _, resource, text, _ in attributes if resource == android_name), "")
+                current = {"pos": pos, "header": header, "size": size, "ext": ext, "start": start,
+                           "stride": stride, "count": count, "element": element, "name": component_name,
+                           "values": [], "labels": [a for a in attributes if a[1] == ANDROID_ATTR_LABEL],
+                           "launcher": False, "file_handler": False,
+                           "has_component_label": any(a[1] == ANDROID_ATTR_LABEL for a in attributes)}
+                components.append(current)
+            # Exclude current labels and targetActivity names from role detection.
+            if current and element not in {"application", "activity", "activity-alias"}:
+                if element == "intent-filter":
+                    current["labels"].extend(a for a in attributes if a[1] == ANDROID_ATTR_LABEL)
+                for _, resource, text, _ in attributes:
+                    if resource == ANDROID_ATTR_LABEL:
+                        continue
+                    current["values"].append(text)
+                    current["launcher"] |= text == "android.intent.category.LAUNCHER"
+                    current["file_handler"] |= text in {"application/zip", "application/x-zip-compressed"}
+            stack.append(current)
+        elif kind == 0x0103:
+            if not stack:
+                raise ValueError("Unbalanced AXML")
+            stack.pop()
+    if label_attr_name is None:
+        raise ValueError("Manifest android:label resource ID missing")
+    namespace_index = strings.index(android_ns)
+    changes = 0
+    # Backwards mutation allows insertion into nodes without invalidating earlier offsets.
+    for component in reversed(components):
+        role = "app" if component["element"] == "application" or component["launcher"] else _component_role(component["name"], component["values"])
+        if role is None and component["file_handler"]:
+            raise ValueError("Cannot identify ZIP entry as chart or respack: " + component["name"])
+        if role is None:
+            continue  # Unrelated activities retain their labels.
+        label_index = label_indices[role]
+        if component["labels"]:
+            for attr, _, _, _ in component["labels"]:
+                struct.pack_into("<I", data, attr + 8, label_index)
+                struct.pack_into("<HBBI", data, attr + 12, 8, 0, 3, label_index)
+        if not component["has_component_label"]:
+            attr = component["ext"] + component["start"] + component["count"] * component["stride"]
+            encoded = struct.pack("<IIIHBBI", namespace_index, label_attr_name, label_index, 8, 0, 3, label_index)
+            encoded += bytes(component["stride"] - 20)
+            data[attr:attr] = encoded
+            struct.pack_into("<H", data, component["ext"] + 12, component["count"] + 1)
+            struct.pack_into("<I", data, component["pos"] + 4, component["size"] + component["stride"])
+        changes += 1
+        print("Android entry label:", component["name"] or component["element"], "->", strings[label_index])
+    if not changes:
+        raise ValueError("No Android application/entry label patched")
+    struct.pack_into("<I", data, 4, len(data))
     return bytes(data)
 
 

@@ -501,6 +501,9 @@ pub struct Slider {
     touch: Option<(u64, f32, bool)>,
     rect: Rect,
     pos: f32,
+    drag_threshold: f32,
+    relative_drag: bool,
+    drag_anchor: Option<(f32, f32)>,
 }
 
 impl Slider {
@@ -518,7 +521,17 @@ impl Slider {
             touch: None,
             rect: Rect::default(),
             pos: f32::INFINITY,
+            drag_threshold: Self::THRESHOLD,
+            relative_drag: false,
+            drag_anchor: None,
         }
+    }
+
+    /// Opt-in: cross a small threshold, then move relative to that position/value.
+    pub fn with_relative_drag(mut self, threshold: f32) -> Self {
+        self.relative_drag = true;
+        self.drag_threshold = if threshold.is_finite() { threshold.max(0.) } else { Self::THRESHOLD };
+        self
     }
 
     pub fn touch(&mut self, touch: &Touch, t: f32, dst: &mut f32) -> Option<bool> {
@@ -534,19 +547,38 @@ impl Slider {
             if touch.id == *id {
                 match touch.phase {
                     TouchPhase::Started | TouchPhase::Moved | TouchPhase::Stationary => {
-                        if (touch.position.x - *start_pos).abs() >= Self::THRESHOLD {
+                        if !*unlocked && (touch.position.x - *start_pos).abs() >= self.drag_threshold {
                             *unlocked = true;
+                            if self.relative_drag {
+                                self.drag_anchor = Some((touch.position.x, *dst));
+                                // Threshold crossing itself does not jump the value.
+                                return Some(false);
+                            }
                         }
-                        if *unlocked {
-                            let p = (touch.position.x - self.rect.x) / self.rect.w;
-                            let p = p.clamp(0., 1.);
-                            let p = self.range.start + (self.range.end - self.range.start) * p;
-                            *dst = (p / self.step).round() * self.step;
+                        if *unlocked && self.rect.w > 0. {
+                            let value = if self.relative_drag {
+                                let (anchor_x, anchor_value) = self.drag_anchor.unwrap_or((touch.position.x, *dst));
+                                let delta = (touch.position.x - anchor_x) / self.rect.w * (self.range.end - self.range.start);
+                                anchor_value + (delta / self.step).round() * self.step
+                            } else {
+                                let p = ((touch.position.x - self.rect.x) / self.rect.w).clamp(0., 1.);
+                                self.range.start + (self.range.end - self.range.start) * p
+                            };
+                            if self.relative_drag {
+                                let clamped = value.clamp(self.range.start, self.range.end);
+                                if clamped != value { self.drag_anchor = Some((touch.position.x, clamped)); }
+                                let changed = clamped != *dst;
+                                *dst = clamped;
+                                return Some(changed);
+                            }
+                            // Keep existing sliders' absolute-position behavior.
+                            *dst = (value / self.step).round() * self.step;
                             return Some(true);
                         }
                     }
                     TouchPhase::Cancelled | TouchPhase::Ended => {
                         self.touch = None;
+                        self.drag_anchor = None;
                     }
                 }
                 return Some(false);
@@ -555,6 +587,7 @@ impl Slider {
             let pos = (self.pos, self.rect.center().y);
             if (touch.position.x - pos.0).hypot(touch.position.y - pos.1) <= Self::RADIUS {
                 self.touch = Some((touch.id, touch.position.x, false));
+                self.drag_anchor = None;
                 return Some(false);
             }
         }
@@ -1597,3 +1630,40 @@ pub fn list_switch() {
 }
 
 pub mod note_conversion_mods;
+
+#[cfg(test)]
+mod resource_slider_tests {
+    use super::*;
+    fn slider() -> Slider {
+        let mut slider = Slider::new(0.0..100.0, 1.).with_relative_drag(0.01);
+        slider.rect = Rect::new(0.1, 0.1, 1., 0.04);
+        slider.pos = 0.6;
+        slider
+    }
+    fn touch(phase: TouchPhase, x: f32) -> Touch { Touch { id: 123, phase, position: vec2(x, 0.12) } }
+    #[test]
+    fn crossing_threshold_preserves_value_then_moves_relatively() {
+        let mut slider = slider(); let mut value = 50.25;
+        assert_eq!(slider.touch(&touch(TouchPhase::Started, 0.6), 0., &mut value), Some(false));
+        slider.touch(&touch(TouchPhase::Moved, 0.605), 0., &mut value);
+        assert_eq!(value, 50.25);
+        slider.touch(&touch(TouchPhase::Moved, 0.612), 0., &mut value);
+        assert_eq!(value, 50.25);
+        slider.touch(&touch(TouchPhase::Stationary, 0.612), 0., &mut value);
+        assert_eq!(value, 50.25);
+        slider.touch(&touch(TouchPhase::Moved, 0.712), 0., &mut value);
+        assert_eq!(value, 60.25);
+        slider.touch(&touch(TouchPhase::Ended, 0.712), 0., &mut value);
+        assert!(slider.drag_anchor.is_none());
+    }
+    #[test]
+    fn reversing_at_endpoint_changes_immediately() {
+        let mut slider = slider(); let mut value = 90.;
+        slider.touch(&touch(TouchPhase::Started, 0.6), 0., &mut value);
+        slider.touch(&touch(TouchPhase::Moved, 0.612), 0., &mut value);
+        slider.touch(&touch(TouchPhase::Moved, 1.), 0., &mut value);
+        assert_eq!(value, 100.);
+        slider.touch(&touch(TouchPhase::Moved, 0.95), 0., &mut value);
+        assert_eq!(value, 95.);
+    }
+}

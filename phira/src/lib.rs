@@ -15,6 +15,8 @@ mod ai_chart_adapter;
 mod ai_model;
 mod ai_service;
 mod anim;
+#[cfg(target_os = "android")]
+mod android_refresh;
 mod bn_image;
 mod bn_import;
 mod censor;
@@ -29,6 +31,7 @@ pub static PHIRAIAD_PRACTICE_LAYOUT_REVISION: [u8; 47] = *b"PHIRAIAD_PRACTICE_LA
 pub mod challenge;
 mod challenge_ui;
 mod custom_font;
+mod custom_resources;
 pub mod custom_rks;
 mod data;
 mod data_guard;
@@ -366,6 +369,8 @@ async fn the_main() -> Result<()> {
     log::startup_checkpoint("07 MainScene construction");
     let mut main = Main::new(Box::new(MainScene::new(font).await?), TimeManager::default(), None).await?;
 
+    #[cfg(target_os = "android")]
+    let mut high_refresh = android_refresh::HighRefresh::new();
     let tm = TimeManager::default();
     let mut fps_time = -1;
 
@@ -382,6 +387,8 @@ async fn the_main() -> Result<()> {
                 Ok(false) => {
                     log::diagnostic_event("LIFECYCLE resume from paused wait begin");
                     main.resume()?;
+                    #[cfg(target_os = "android")]
+                    high_refresh.resume();
                     log::diagnostic_event("LIFECYCLE resume from paused wait complete");
                 }
                 Ok(true) => {}
@@ -389,6 +396,8 @@ async fn the_main() -> Result<()> {
             }
         }
 
+        #[cfg(target_os = "android")]
+        high_refresh.tick();
         log::frame_checkpoint(diagnostic_frame, "update begin");
         let frame_start = tm.real_time();
         if !last_frame_start.is_nan() {
@@ -424,6 +433,8 @@ async fn the_main() -> Result<()> {
                 } else {
                     log::diagnostic_event("LIFECYCLE resume apply begin");
                     main.resume()?;
+                    #[cfg(target_os = "android")]
+                    high_refresh.resume();
                     log::diagnostic_event("LIFECYCLE resume apply complete");
                 }
             }

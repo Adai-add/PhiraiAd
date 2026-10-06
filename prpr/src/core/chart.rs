@@ -47,6 +47,9 @@ pub struct Chart {
     pub attach_ui: [Option<usize>; 7],
 
     pub hitsounds: HitSoundMap,
+    // Reuse per-frame transform storage; resolve all parents before updating notes.
+    frame_transforms: Vec<(Matrix, f32)>,
+    frame_transform_key: Option<(f64, f32)>,
 }
 
 /// Preserve original note types for live editor switching without reparsing assets.
@@ -107,6 +110,8 @@ impl Chart {
             attach_ui,
 
             hitsounds,
+            frame_transforms: Vec::new(),
+            frame_transform_key: None,
         }
     }
 
@@ -147,6 +152,7 @@ impl Chart {
     }
 
     pub fn reset(&mut self) {
+        self.frame_transform_key = None;
         self.lines
             .iter_mut()
             .flat_map(|it| it.notes.iter_mut())
@@ -167,12 +173,14 @@ impl Chart {
         for line in &mut self.lines {
             line.object.set_time(res.time);
         }
-        // TODO optimize
-        let trs = self.lines.iter().map(|it| it.now_transform(res, &self.lines)).collect::<Vec<_>>();
-        let rotations = self.lines.iter().map(|it| it.fetch_rot(&self.lines)).collect::<Vec<_>>();
-        for ((line, tr), rot) in self.lines.iter_mut().zip(trs).zip(rotations) {
-            line.update(res, tr, rot);
+        self.frame_transform_key = None;
+        let lines = &self.lines;
+        self.frame_transforms.clear();
+        self.frame_transforms.extend(lines.iter().map(|line| (line.now_transform(res, lines), line.fetch_rot(lines))));
+        for (line, (tr, rot)) in self.lines.iter_mut().zip(&self.frame_transforms) {
+            line.update(res, *tr, *rot);
         }
+        self.frame_transform_key = Some((res.time, res.aspect_ratio));
         for effect in &mut self.extra.effects {
             effect.update(res);
         }
@@ -202,7 +210,12 @@ impl Chart {
         res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(flip_x, -flip_y)), |res| {
             let mut guard = self.bpm_list.borrow_mut();
             for id in &self.order {
-                self.lines[*id].render(ui, res, &self.lines, &mut guard, &self.settings, *id);
+                // The normal draw and native noise capture use identical line
+                // event transforms. Reuse only at the exact time/aspect updated.
+                let transform = (self.frame_transform_key == Some((res.time, res.aspect_ratio)))
+                    .then(|| self.frame_transforms.get(*id).map(|(matrix, _)| *matrix))
+                    .flatten();
+                self.lines[*id].render(ui, res, &self.lines, &mut guard, &self.settings, *id, transform);
             }
             drop(guard);
             res.note_buffer.borrow_mut().draw_all();

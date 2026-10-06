@@ -288,6 +288,9 @@ impl Page for SettingsPage {
     }
 
     fn next_page(&mut self) -> NextPage {
+        if let Some(kind) = self.list_replica.resource_edit_requested.take() {
+            return NextPage::Overlay(Box::new(super::custom_resources::ResourceEditor::new(kind)));
+        }
         if self.list_replica.chart.custom_edit_requested {
             self.list_replica.chart.custom_edit_requested = false;
             return NextPage::Overlay(Box::new(super::custom_judgement::CustomJudgementEditor::new()));
@@ -1552,6 +1555,8 @@ struct ReplicaList {
     resources_open: bool,
     font_import_btn: DRectButton,
     font_reset_btn: DRectButton,
+    resource_edit_btns: [DRectButton; 3],
+    resource_edit_requested: Option<crate::custom_resources::Kind>,
 }
 impl ReplicaList {
     fn new() -> Self {
@@ -1560,28 +1565,30 @@ impl ReplicaList {
             debug: DebugList::range_settings(),
             reports: DebugList::report_settings(),
             ranges_btn: DRectButton::new(),
-            ranges_open: true,
+            ranges_open: get_data().settings_expansion.ranges,
             gameplay_btn: DRectButton::new(),
             reports_btn: DRectButton::new(),
-            gameplay_open: true,
-            reports_open: true,
+            gameplay_open: get_data().settings_expansion.gameplay,
+            reports_open: get_data().settings_expansion.reports,
             timing_btn: DRectButton::new(),
-            timing_open: true,
+            timing_open: get_data().settings_expansion.timing,
             timing_enabled_btn: DRectButton::new(),
             timing_counts_btn: DRectButton::new(),
             timing_edit_btn: DRectButton::new(),
             timing_edit_requested: false,
             noise_btn: DRectButton::new(),
-            noise_open: true,
+            noise_open: get_data().settings_expansion.noise,
             noise_enabled_btn: DRectButton::new(),
             noise_precise_btn: DRectButton::new(),
             noise_distortion_btn: DRectButton::new(),
             noise_music_btn: DRectButton::new(),
             noise_low_btn: DRectButton::new(),
             resources_btn: DRectButton::new(),
-            resources_open: false,
+            resources_open: get_data().settings_expansion.resources,
             font_import_btn: DRectButton::new(),
             font_reset_btn: DRectButton::new(),
+            resource_edit_btns: std::array::from_fn(|_| DRectButton::new()),
+            resource_edit_requested: None,
         }
     }
     fn top_touch(&mut self, touch: &Touch, t: f32) -> bool {
@@ -1590,9 +1597,17 @@ impl ReplicaList {
     fn touch(&mut self, touch: &Touch, t: f32) -> Result<Option<bool>> {
         if self.resources_btn.touch(touch, t) {
             self.resources_open ^= true;
+            get_data_mut().settings_expansion.resources = self.resources_open;
+            save_data()?;
             self.font_import_btn = DRectButton::new();
             self.font_reset_btn = DRectButton::new();
+            self.resource_edit_btns = std::array::from_fn(|_| DRectButton::new());
             return Ok(Some(false));
+        }
+        if self.resources_open {
+            for (i, kind) in [crate::custom_resources::Kind::Music, crate::custom_resources::Kind::Background, crate::custom_resources::Kind::Character].into_iter().enumerate() {
+                if self.resource_edit_btns[i].touch(touch, t) { self.resource_edit_requested = Some(kind); return Ok(Some(false)); }
+            }
         }
         if self.resources_open && self.font_import_btn.touch(touch, t) {
             prpr::scene::request_file("_custom_font");
@@ -1605,6 +1620,8 @@ impl ReplicaList {
         }
         if self.timing_btn.touch(touch, t) {
             self.timing_open ^= true;
+            get_data_mut().settings_expansion.timing = self.timing_open;
+            save_data()?;
             self.timing_edit_btn = DRectButton::new();
             self.timing_enabled_btn = DRectButton::new();
             self.timing_counts_btn = DRectButton::new();
@@ -1624,6 +1641,8 @@ impl ReplicaList {
         }
         if self.noise_btn.touch(touch, t) {
             self.noise_open ^= true;
+            get_data_mut().settings_expansion.noise = self.noise_open;
+            save_data()?;
             self.noise_enabled_btn = DRectButton::new();
             self.noise_precise_btn = DRectButton::new();
             self.noise_distortion_btn = DRectButton::new();
@@ -1660,17 +1679,23 @@ impl ReplicaList {
         }
         if self.gameplay_btn.touch(touch, t) {
             self.gameplay_open ^= true;
+            get_data_mut().settings_expansion.gameplay = self.gameplay_open;
+            save_data()?;
             // Reset popup/hit targets when collapsing, without changing the saved settings.
             self.chart = ChartList::new(true);
             return Ok(Some(false));
         }
         if self.ranges_btn.touch(touch, t) {
             self.ranges_open ^= true;
+            get_data_mut().settings_expansion.ranges = self.ranges_open;
+            save_data()?;
             self.debug = DebugList::range_settings();
             return Ok(Some(false));
         }
         if self.reports_btn.touch(touch, t) {
             self.reports_open ^= true;
+            get_data_mut().settings_expansion.reports = self.reports_open;
+            save_data()?;
             self.reports = DebugList::report_settings();
             return Ok(Some(false));
         }
@@ -1782,7 +1807,13 @@ impl ReplicaList {
                         self.font_import_btn
                             .render_text(ui, Rect::new(rr.x - 0.23, rr.y, 0.20, rr.h), t, "导入", 0.5, false);
                         self.font_reset_btn.render_text(ui, rr, t, "恢复默认", 0.45, false);
-                        (w, ITEM_HEIGHT)
+                        for (i, kind) in [crate::custom_resources::Kind::Music, crate::custom_resources::Kind::Background, crate::custom_resources::Kind::Character].into_iter().enumerate() {
+                            ui.dy(ITEM_HEIGHT);
+                            ui.fill_path(&Rect::new(0., 0., w, ITEM_HEIGHT - 0.012).rounded(0.012), Color::from_rgba(30, 49, 62, 180));
+                            render_partition_title(ui, w, true, kind.title(), Some(kind.formats().into()));
+                            self.resource_edit_btns[i].render_text(ui, right_rect(w), t, "编辑", 0.5, false);
+                        }
+                        (w, ITEM_HEIGHT * 4.)
                     } else {
                         self.reports.render(ui, child, t)
                     }
