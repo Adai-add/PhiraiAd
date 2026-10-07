@@ -153,8 +153,35 @@ impl Page for CustomJudgementEditor {
                     _ => self.error = "连击分数占比请输入 0 到 100 之间的百分比".into(),
                 }
             }
-            let y = -top + 0.285;
-            let height = (2. * top - 0.38).max(0.1);
+            ui.text("Flick滑动速度阈值").pos(-0.50, -top + 0.277).size(0.34).draw();
+            let mut flick_threshold = format!("{:.3}", self.draft.current.flick_speed_threshold);
+            if Self::field(
+                ui,
+                "custom_flick_speed_threshold",
+                Rect::new(-0.08, -top + 0.265, 0.24, 0.065),
+                &mut flick_threshold,
+            ) {
+                match flick_threshold.trim().parse::<f64>() {
+                    Ok(v) if v.is_finite() && v >= 0. => {
+                        self.draft.current.flick_speed_threshold = v;
+                        self.error.clear();
+                    }
+                    _ => self.error = "Flick滑动速度阈值请输入非负有限数值".into(),
+                }
+            }
+            if ui.button(
+                "custom_flick_direction_change",
+                Rect::new(0.22, -top + 0.265, 0.72, 0.065),
+                if self.draft.current.flick_require_direction_change {
+                    "判定多个Flick需要换方向：是"
+                } else {
+                    "判定多个Flick需要换方向：否"
+                },
+            ) {
+                self.draft.current.flick_require_direction_change ^= true;
+            }
+            let y = -top + 0.36;
+            let height = (2. * top - 0.455).max(0.1);
             ui.scope(|ui| {
                 ui.dx(-0.94);
                 ui.dy(y);
@@ -198,7 +225,13 @@ impl Page for CustomJudgementEditor {
             ui.scope(|ui| {
                 ui.dx(-0.50);
                 ui.dy(y);
-                for (x, label) in [(0.12, "阈值"), (0.52, "档位"), (0.88, "ACC贡献"), (1.23, "打击特效颜色")] {
+                for (x, label) in [
+                    (0.12, "阈值"),
+                    (0.45, "档位"),
+                    (0.74, "ACC贡献"),
+                    (0.98, "额外加分"),
+                    (1.28, "打击特效颜色"),
+                ] {
                     ui.text(label).pos(x, 0.).anchor(0.5, 0.).size(0.30).draw();
                 }
                 ui.dy(0.075);
@@ -221,9 +254,9 @@ impl Page for CustomJudgementEditor {
                             }
                         }
                         let band = &mut draft.current.bands[i];
-                        ui.text(&band.label).pos(0.52, 0.066).anchor(0.5, 0.5).size(0.32).draw();
+                        ui.text(&band.label).pos(0.45, 0.066).anchor(0.5, 0.5).size(0.30).draw();
                         let mut contribution = format!("{}%", band.contribution * 100.);
-                        if Self::field(ui, &format!("custom_acc_{i}"), Rect::new(0.79, 0.042, 0.18, 0.05), &mut contribution) {
+                        if Self::field(ui, &format!("custom_acc_{i}"), Rect::new(0.66, 0.042, 0.16, 0.05), &mut contribution) {
                             match contribution.trim().trim_end_matches('%').trim().parse::<f64>() {
                                 Ok(v) if v.is_finite() && v >= 0. => {
                                     band.contribution = v / 100.;
@@ -232,9 +265,19 @@ impl Page for CustomJudgementEditor {
                                 _ => *error = "请输入非负的ACC百分比".into(),
                             }
                         }
+                        let mut extra_score = band.extra_score.to_string();
+                        if Self::field(ui, &format!("custom_extra_score_{i}"), Rect::new(0.87, 0.042, 0.21, 0.05), &mut extra_score) {
+                            match extra_score.trim().parse::<u32>() {
+                                Ok(v) => {
+                                    band.extra_score = v;
+                                    error.clear();
+                                }
+                                _ => *error = "额外加分请输入0或正整数".into(),
+                            }
+                        }
                         if i != 0 && i != count - 1 {
                             let mut color = format!("#{:02X}{:02X}{:02X}{:02X}", band.color[0], band.color[1], band.color[2], band.color[3]);
-                            if Self::field(ui, &format!("custom_color_{i}"), Rect::new(1.10, 0.042, 0.33, 0.05), &mut color) {
+                            if Self::field(ui, &format!("custom_color_{i}"), Rect::new(1.15, 0.042, 0.28, 0.05), &mut color) {
                                 let code = color.trim().trim_start_matches('#');
                                 match u32::from_str_radix(code, 16) {
                                     Ok(v) if code.len() == 6 || code.len() == 8 => {
@@ -245,11 +288,11 @@ impl Page for CustomJudgementEditor {
                                 }
                             }
                             ui.fill_rect(
-                                Rect::new(1.025, 0.052, 0.045, 0.03),
+                                Rect::new(1.095, 0.052, 0.04, 0.03),
                                 Color::from_rgba(band.color[0], band.color[1], band.color[2], band.color[3]),
                             );
                         } else {
-                            ui.text("—").pos(1.23, 0.066).anchor(0.5, 0.5).size(0.32).draw();
+                            ui.text("—").pos(1.28, 0.066).anchor(0.5, 0.5).size(0.32).draw();
                         }
                         ui.dy(0.10);
                     }
@@ -260,7 +303,7 @@ impl Page for CustomJudgementEditor {
             ui.text(if !self.error.is_empty() {
                 self.error.as_str()
             } else {
-                validation.as_deref().unwrap_or("提前为正，延后为负；边界递减。ACC = 总贡献 ÷ 音符数")
+                validation.as_deref().unwrap_or("提前为正，延后为负；边界递减。Drag/Flick跟随Perfect；额外加分独立计入总分")
             })
             .pos(-0.94, top - 0.07)
             .size(0.30)

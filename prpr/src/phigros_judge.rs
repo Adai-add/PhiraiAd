@@ -281,16 +281,16 @@ impl Judge {
     }
 
     pub fn step(&mut self, frame: Frame<'_>) -> Result {
-        self.step_impl(frame, None)
+        self.step_impl(frame, None, false)
     }
 
     /// Reuse the original gesture matching/arming/resolution, changing only
     /// early activation and unarmed Miss boundaries (signed seconds, early positive).
-    pub fn step_custom_gestures(&mut self, frame: Frame<'_>, early: f64, miss: f64) -> Result {
-        self.step_impl(frame, Some((early, miss)))
+    pub fn step_custom_gestures(&mut self, frame: Frame<'_>, early: f64, miss: f64, repeat_flick: bool) -> Result {
+        self.step_impl(frame, Some((early, miss)), repeat_flick)
     }
 
-    fn step_impl(&mut self, frame: Frame<'_>, custom: Option<(f64, f64)>) -> Result {
+    fn step_impl(&mut self, frame: Frame<'_>, custom: Option<(f64, f64)>, repeat_flick: bool) -> Result {
         let mut result = Result::default();
         // Match all gestures before scoring: a note crossing its late limit
         // this frame must still be available to the interval fallback.
@@ -302,7 +302,15 @@ impl Judge {
             }
         }
         for (finger_id, finger) in frame.fingers.iter().enumerate().filter(|(_, finger)| finger.flick) {
-            if let Some(index) = self.candidate(&frame, finger, true, custom) {
+            if repeat_flick {
+                // Continuous custom Flick: while this finger is above the
+                // configured speed threshold, every spatial/timing candidate
+                // is allowed to arm. candidate() skips notes already matched,
+                // so this loop terminates after all eligible Flicks are armed.
+                while let Some(index) = self.candidate(&frame, finger, true, custom) {
+                    self.notes[index].state.matched = true;
+                }
+            } else if let Some(index) = self.candidate(&frame, finger, true, custom) {
                 self.notes[index].state.matched = true;
                 result.consumed_fingers.push(finger_id);
             }
@@ -428,11 +436,11 @@ mod tests {
             let held = vec![vec![[0., 0.]]];
             let input = [finger(false, kind == Kind::Flick, 0.)];
             let mut judge = Judge::new(vec![note(kind, 0.)]);
-            assert!(judge.step_custom_gestures(frame(-0.181, &input, &held), 0.180, -0.165).events.is_empty());
+            assert!(judge.step_custom_gestures(frame(-0.181, &input, &held), 0.180, -0.165, false).events.is_empty());
             assert!(!judge.notes[0].state.matched);
-            assert!(judge.step_custom_gestures(frame(-0.180, &input, &held), 0.180, -0.165).events.is_empty());
+            assert!(judge.step_custom_gestures(frame(-0.180, &input, &held), 0.180, -0.165, false).events.is_empty());
             assert!(judge.notes[0].state.matched);
-            let result = judge.step_custom_gestures(frame(0., &[], &[]), 0.180, -0.165);
+            let result = judge.step_custom_gestures(frame(0., &[], &[]), 0.180, -0.165, false);
             assert!(matches!(
                 result.events.as_slice(),
                 [Event::Final {
@@ -441,7 +449,7 @@ mod tests {
                 }]
             ));
             let mut late = Judge::new(vec![note(kind, 0.)]);
-            let result = late.step_custom_gestures(frame(0.160, &input, &held), 0.180, -0.165);
+            let result = late.step_custom_gestures(frame(0.160, &input, &held), 0.180, -0.165, false);
             assert!(matches!(
                 result.events.as_slice(),
                 [Event::Final {
@@ -450,7 +458,7 @@ mod tests {
                 }]
             ));
             let mut missed = Judge::new(vec![note(kind, 0.)]);
-            let result = missed.step_custom_gestures(frame(0.165, &input, &held), 0.180, -0.165);
+            let result = missed.step_custom_gestures(frame(0.165, &input, &held), 0.180, -0.165, false);
             assert!(matches!(result.events.as_slice(), [Event::Final { outcome: Outcome::Miss, .. }]));
         }
     }
@@ -460,7 +468,7 @@ mod tests {
             let held = vec![vec![[0., 0.]]];
             let input = [finger(false, kind == Kind::Flick, 0.)];
             let mut judge = Judge::new(vec![note(kind, 0.)]);
-            let result = judge.step_custom_gestures(frame(0.300, &input, &held), -0.200, -0.500);
+            let result = judge.step_custom_gestures(frame(0.300, &input, &held), -0.200, -0.500, false);
             assert!(matches!(
                 result.events.as_slice(),
                 [Event::Final {
@@ -470,6 +478,18 @@ mod tests {
             ));
         }
     }
+    #[test]
+    fn custom_continuous_flick_can_arm_multiple_candidates_without_consuming_finger() {
+        let input = [finger(false, true, 0.)];
+        let mut judge = Judge::new(vec![
+            Note::new(0, 0, 0., 0., Kind::Flick),
+            Note::new(0, 1, 0., 0., Kind::Flick),
+        ]);
+        let result = judge.step_custom_gestures(frame(0., &input, &[]), 0.180, -0.165, true);
+        assert!(result.consumed_fingers.is_empty());
+        assert!(judge.notes.iter().all(|note| note.state.matched));
+    }
+
     const NORMAL: Windows = Windows {
         perfect: 0.08,
         good: 0.18,
@@ -567,15 +587,15 @@ mod tests {
         let mut judge = Judge::new(vec![note(Kind::Flick, 0.)]);
         let mut f = frame(-0.15, &swipe, &[]);
         f.fullscreen = true;
-        judge.step_custom_gestures(f, 0.1, -0.1);
+        judge.step_custom_gestures(f, 0.1, -0.1, false);
         assert!(!judge.notes[0].state.matched);
         let mut f = frame(0., &swipe, &[]);
         f.fullscreen = true;
-        assert_eq!(outcomes(judge.step_custom_gestures(f, 0.1, -0.1)), vec![Outcome::Perfect]);
+        assert_eq!(outcomes(judge.step_custom_gestures(f, 0.1, -0.1, false)), vec![Outcome::Perfect]);
         let mut judge = Judge::new(vec![note(Kind::Flick, 0.)]);
         let mut f = frame(0.11, &swipe, &[]);
         f.fullscreen = true;
-        assert_eq!(outcomes(judge.step_custom_gestures(f, 0.1, -0.1)), vec![Outcome::Miss]);
+        assert_eq!(outcomes(judge.step_custom_gestures(f, 0.1, -0.1, false)), vec![Outcome::Miss]);
     }
     fn outcomes(result: Result) -> Vec<Outcome> {
         result

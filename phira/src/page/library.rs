@@ -739,8 +739,11 @@ impl Page for LibraryPage {
                 self.challenge_scene = None;
             }
             self.sync_rks_views();
-            if let Some(charts) = self.challenge.start.take() {
-                self.challenge_scene = Some(NextScene::Overlay(Box::new(crate::scene::challenge::ChallengeScene::new(charts))));
+            if let Some((charts, record_single_scores)) = self.challenge.start.take() {
+                self.challenge_scene = Some(NextScene::Overlay(Box::new(crate::scene::challenge::ChallengeScene::new(
+                    charts,
+                    record_single_scores,
+                ))));
             }
             return Ok(true);
         }

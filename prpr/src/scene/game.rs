@@ -786,10 +786,6 @@ impl GameScene {
         )
     }
 
-    fn touch_scale(&self) -> f32 {
-        (screen_width() / screen_height()) / self.res.aspect_ratio
-    }
-
     fn locked_note_flow_speed(playback_speed: f32) -> f32 {
         ((1. / playback_speed.max(PLAYBACK_SPEED_MIN) * 1000.).round() / 1000.).clamp(NOTE_FLOW_SPEED_MIN, NOTE_FLOW_SPEED_MAX)
     }
@@ -999,7 +995,16 @@ impl GameScene {
             .map(|h| h.combo)
             .or(self.preview_combo)
             .unwrap_or_else(|| self.judge.combo());
-        let replay_score = self.replay_view_hud.as_ref().map_or_else(|| self.judge.score(), |h| h.score);
+        let replay_score = self.replay_view_hud.as_ref().map_or_else(
+            || {
+                if self.res.config.challenge_mode {
+                    self.judge.accuracy_score()
+                } else {
+                    self.judge.score()
+                }
+            },
+            |h| h.score,
+        );
         let replay_acc = self
             .replay_view_hud
             .as_ref()
@@ -1275,10 +1280,11 @@ impl GameScene {
                 let previous_note_flow_lock = self.exercise_note_flow_locked;
                 let previous_judgement_percent = self.exercise_judgement_percent;
                 let previous_judgement_lock = self.exercise_judgement_locked;
-                let asp = self.touch_scale();
-                for touch in ui.ensure_touches() {
-                    touch.position *= asp;
-                }
+                // Practice controls are rendered in the chart camera/viewport.
+                // Judge::get_touches() (used by Ui) is already normalized against
+                // that same letterboxed viewport, so applying a screen/chart
+                // aspect ratio again would shift hit regions whenever the chart
+                // does not fill the display.
                 let previous_pitch = self.res.config.practice_preserve_pitch;
                 ui.scope(|ui| {
                     ui.dx(-0.9);
@@ -1511,9 +1517,6 @@ impl GameScene {
                 tx.ui
                     .fill_rect(re.feather(0.01), Color::new(1., 1., 1., if self.exercise_btns.1.touching() { 0.5 } else { 1. }));
                 tx.draw();
-                for touch in ui.ensure_touches() {
-                    touch.position /= asp;
-                }
             }
         }
         if let Some(pos) = retry_requested {
@@ -1938,7 +1941,9 @@ impl Scene for GameScene {
                     self.finish_play_report(ReportEndReason::Completed, self.res.track_length, tm.real_time());
                     if self.res.config.challenge_mode {
                         self.music.pause()?;
-                        self.next_scene = Some(NextScene::PopWithResult(Box::new(ChallengeEvent::Completed(self.judge.result()))));
+                        let mut result = self.judge.result();
+                        result.score = self.judge.accuracy_score();
+                        self.next_scene = Some(NextScene::PopWithResult(Box::new(ChallengeEvent::Completed(result))));
                         return Ok(());
                     }
                     let mut record_data = None;
@@ -2240,15 +2245,14 @@ impl Scene for GameScene {
             self.offset_analysis.touch(touch, tm.real_time() as f32);
         }
         if self.mode == GameMode::Exercise && tm.paused() {
-            let touch = Touch {
-                position: touch.position * self.touch_scale(),
-                ..touch.clone()
-            };
-            if self.exercise_btns.0.touch(&touch) {
+            // SceneManager supplies gameplay touches in the current chart
+            // viewport coordinates. RectButton stores the practice time buttons
+            // in that same coordinate system, including letterboxed charts.
+            if self.exercise_btns.0.touch(touch) {
                 request_input("exercise_start", InputBox::new().default_text(fmt_time(self.exercise_range.start as f32)));
                 return Ok(true);
             }
-            if self.exercise_btns.1.touch(&touch) {
+            if self.exercise_btns.1.touch(touch) {
                 request_input("exercise_end", InputBox::new().default_text(fmt_time(self.exercise_range.end as f32)));
                 return Ok(true);
             }

@@ -132,12 +132,20 @@ pub struct FlickTracker {
     stopped: bool,
     official: bool,
     previous_flick_speed: f32,
+    current_flick_speed: f32,
 }
 
 impl FlickTracker {
     pub fn new(dpi: u32, time: f32, point: Point, official: bool) -> Self {
+        Self::new_with_trigger_threshold(dpi, time, point, official, None)
+    }
+
+    fn new_with_trigger_threshold(dpi: u32, time: f32, point: Point, official: bool, trigger_threshold_380: Option<f32>) -> Self {
         let threshold = if official {
-            0.06 * dpi.max(1) as f32 / 380.
+            // Keep the original literal path byte-for-byte when no custom
+            // threshold is requested. A custom trigger uses the same 1:5
+            // trigger-to-projection ratio as the stock 0.30 / 0.06 pair.
+            trigger_threshold_380.map_or(0.06, |trigger| trigger / 5.) * dpi.max(1) as f32 / 380.
         } else {
             // Preserve Phira's original fixed-DPI behaviour.
             FLICK_SPEED_THRESHOLD * 275. / 386.
@@ -151,6 +159,7 @@ impl FlickTracker {
             stopped: true,
             official,
             previous_flick_speed: 0.,
+            current_flick_speed: 0.,
         }
     }
 
@@ -174,12 +183,14 @@ impl FlickTracker {
                 self.stopped = current_speed < self.threshold * 5.;
             }
             self.previous_flick_speed = projected_speed;
+            self.current_flick_speed = current_speed;
             self.last_delta = Some(delta);
             self.last_time = time;
             return;
         }
         if let Some(last_delta) = &self.last_delta {
             let speed = delta.dot(last_delta) / dt;
+            self.current_flick_speed = delta.magnitude() / dt;
             if speed < self.threshold {
                 self.stopped = true;
             }
@@ -193,9 +204,16 @@ impl FlickTracker {
             // warn!("new flick!");
             // }
             // }
+        } else {
+            self.current_flick_speed = delta.magnitude() / dt;
         }
         self.last_delta = Some(delta.normalize());
         self.last_time = time;
+    }
+
+    #[inline]
+    fn continuous_flick_active(&self) -> bool {
+        self.official && self.current_flick_speed > self.threshold * 5.
     }
 }
 
@@ -270,11 +288,22 @@ fn complete_finger_snapshots(touches: &mut HashMap<u64, Touch>, active: &HashMap
     }
 }
 
-fn rebind_official_flick_tracker(trackers: &mut HashMap<u64, FlickTracker>, id: u64, dpi: u32, frame_time: f32, position: Vec2, unit: f64) -> bool {
+fn rebind_official_flick_tracker(
+    trackers: &mut HashMap<u64, FlickTracker>,
+    id: u64,
+    dpi: u32,
+    frame_time: f32,
+    position: Vec2,
+    unit: f64,
+    trigger_threshold_380: Option<f32>,
+) -> bool {
     if trackers.contains_key(&id) {
         return false;
     }
-    trackers.insert(id, FlickTracker::new(dpi, frame_time, to_phigros_motion_point(position, unit), true));
+    trackers.insert(
+        id,
+        FlickTracker::new_with_trigger_threshold(dpi, frame_time, to_phigros_motion_point(position, unit), true, trigger_threshold_380),
+    );
     true
 }
 
@@ -376,6 +405,7 @@ pub struct TouchDebugTrackerState {
     pub last_x: f32,
     pub last_y: f32,
     pub previous_flick_speed: f32,
+    pub current_flick_speed: f32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -457,6 +487,7 @@ fn touch_debug_tracker_states(trackers: &HashMap<u64, FlickTracker>) -> Vec<Touc
             last_x: tracker.last_point.x,
             last_y: tracker.last_point.y,
             previous_flick_speed: tracker.previous_flick_speed,
+            current_flick_speed: tracker.current_flick_speed,
         })
         .collect();
     states.sort_unstable_by_key(|it| it.finger_id);
@@ -608,6 +639,7 @@ pub(crate) struct JudgeInner {
     custom_contribution: Option<f64>,
     custom_scheme: Option<crate::custom_judgement::Scheme>,
     custom_counts: [u32; 9],
+    custom_extra_score: u32,
     early_kind: [u32; 4],
     late_kind: [u32; 4],
 }
@@ -626,6 +658,7 @@ impl JudgeInner {
             custom_contribution: None,
             custom_scheme: None,
             custom_counts: [0; 9],
+            custom_extra_score: 0,
             early_kind: [0; 4],
             late_kind: [0; 4],
         }
@@ -664,6 +697,7 @@ impl JudgeInner {
         self.custom_contribution = None;
         self.custom_scheme = None;
         self.custom_counts = [0; 9];
+        self.custom_extra_score = 0;
         self.early_kind = [0; 4];
         self.late_kind = [0; 4];
     }
@@ -688,13 +722,25 @@ impl JudgeInner {
         if self.num_of_notes == 0 {
             return 0;
         }
-        if self.custom_contribution.is_none() && self.counts[0] == self.num_of_notes {
+        let base = if self.custom_contribution.is_none() && self.counts[0] == self.num_of_notes {
             TOTAL
         } else {
             let combo_ratio = self.custom_scheme.as_ref().map_or(0.1, |s| s.combo_score_ratio);
             let score = ((1. - combo_ratio) * self.accuracy() + self.max_combo as f64 / self.num_of_notes as f64 * combo_ratio) * TOTAL as f64;
             score.round() as u32
+        };
+        // Custom per-band bonus is deliberately independent of ACC/combo and
+        // may raise the displayed/result score above 1,000,000.
+        base.saturating_add(self.custom_extra_score)
+    }
+
+    /// Score used by challenge/course mode: accuracy only, with no combo contribution.
+    pub fn accuracy_score(&self) -> u32 {
+        const TOTAL: f64 = 1000000.;
+        if self.num_of_notes == 0 {
+            return 0;
         }
+        (self.accuracy() * TOTAL).round() as u32
     }
 
     fn record_timing(&mut self, difference: f64) {
@@ -1098,6 +1144,11 @@ impl Judge {
         self.inner.score()
     }
 
+    #[inline]
+    pub fn accuracy_score(&self) -> u32 {
+        self.inner.accuracy_score()
+    }
+
     pub(crate) fn on_new_frame() {
         let mut handler = Handler {
             status: TouchStatus::default(),
@@ -1212,6 +1263,14 @@ impl Judge {
         let other_official = res.config.judgement_mode == JudgementMode::PhigrosReplica;
         let persistent_input = other_official || res.config.judgement_mode == JudgementMode::Custom;
         let flick_official = res.config.flick_judgement_mode() == JudgementMode::PhigrosReplica || res.config.judgement_mode == JudgementMode::Custom;
+        let custom_flick_threshold = if res.config.judgement_mode == JudgementMode::Custom {
+            let threshold = res.config.effective_custom_judgement().flick_speed_threshold as f32;
+            // 0.30 is the exact stock trigger; keep using FlickTracker's old
+            // constructor path so a legacy/default scheme changes no threshold.
+            ((threshold - 0.30).abs() > f32::EPSILON).then_some(threshold)
+        } else {
+            None
+        };
         let strict_official = res.config.phigros_strict_judgement && (other_official || flick_official);
         if strict_official {
             self.recent_frame_times.push(get_frame_time() as f64);
@@ -1439,7 +1498,16 @@ impl Judge {
                     TouchPhase::Started => {
                         let tracker_start = if flick_official { official_frame_time } else { sample_time };
                         self.trackers
-                            .insert(id, FlickTracker::new(res.dpi, tracker_start, tracker_point, flick_official));
+                            .insert(
+                                id,
+                                FlickTracker::new_with_trigger_threshold(
+                                    res.dpi,
+                                    tracker_start,
+                                    tracker_point,
+                                    flick_official,
+                                    custom_flick_threshold,
+                                ),
+                            );
                         if touch_debug_enabled {
                             debug_tracker_started_ids.push(id);
                         }
@@ -1509,6 +1577,7 @@ impl Judge {
                         official_frame_time,
                         motion_position(touch.position),
                         phigros_unit,
+                        custom_flick_threshold,
                     ) {
                         official_started.insert(id);
                         if touch_debug_enabled {
@@ -2058,6 +2127,7 @@ impl Judge {
                     *sum += scheme.bands[stage].contribution;
                 }
                 self.inner.custom_counts[stage] += 1;
+                self.inner.custom_extra_score = self.inner.custom_extra_score.saturating_add(scheme.bands[stage].extra_score);
                 Some(if judgement == Judgement::Miss {
                     scheme.boundaries_ms[scheme.bands.len() - 1]
                 } else {
@@ -2231,6 +2301,7 @@ impl Judge {
         let t = res.time;
         let speed = res.config.speed as f64;
         let scheme = res.config.effective_custom_judgement();
+        let repeat_flick_without_rearm = !scheme.flick_require_direction_change;
         let count = scheme.bands.len();
         let boundaries: [f64; 9] = std::array::from_fn(|i| scheme.boundaries_ms.get(i).copied().unwrap_or(f64::NEG_INFINITY));
         let classify = |offset: f64| -> Option<usize> {
@@ -2384,7 +2455,14 @@ impl Judge {
             .enumerate()
             .map(|(i, touch)| replica::Finger {
                 click: false,
-                flick: matches!(touch.phase, TouchPhase::Moved | TouchPhase::Stationary) && self.trackers.get(&touch.id).is_some_and(|x| x.flicked),
+                flick: matches!(touch.phase, TouchPhase::Moved | TouchPhase::Stationary)
+                    && self.trackers.get(&touch.id).is_some_and(|x| {
+                        if repeat_flick_without_rearm {
+                            x.continuous_flick_active()
+                        } else {
+                            x.flicked
+                        }
+                    }),
                 positions: event_pos
                     .iter()
                     .map(|line| line[i].map(|p| [p.x as f64 / unit, p.y as f64 / unit]))
@@ -2414,10 +2492,13 @@ impl Judge {
             },
             boundaries[0] / 1000.,
             latest / 1000.,
+            repeat_flick_without_rearm,
         );
-        for i in result.consumed_fingers {
-            if let Some(tracker) = self.trackers.get_mut(&touches[i].id) {
-                tracker.consume();
+        if !repeat_flick_without_rearm {
+            for i in result.consumed_fingers {
+                if let Some(tracker) = self.trackers.get_mut(&touches[i].id) {
+                    tracker.consume();
+                }
             }
         }
         for event in result.events {
@@ -2552,6 +2633,7 @@ impl Judge {
                     *sum += scheme.bands[stage].contribution;
                 }
                 self.inner.custom_counts[stage] += 1;
+                self.inner.custom_extra_score = self.inner.custom_extra_score.saturating_add(scheme.bands[stage].extra_score);
                 scheme.outcome(stage)
             } else {
                 Judgement::Perfect
@@ -2775,6 +2857,22 @@ mod replica_input_tests {
     }
 
     #[test]
+    fn custom_flick_speed_threshold_controls_trigger_and_continuous_mode_survives_consume() {
+        let mut below = FlickTracker::new_with_trigger_threshold(380, 0., Point::new(0., 0.), true, Some(0.50));
+        below.push(1. / 60., Point::new(0.49, 0.));
+        assert!(!below.flicked);
+        assert!(!below.continuous_flick_active());
+
+        let mut hit = FlickTracker::new_with_trigger_threshold(380, 0., Point::new(0., 0.), true, Some(0.50));
+        hit.push(1. / 60., Point::new(0.51, 0.));
+        assert!(hit.flicked);
+        assert!(hit.continuous_flick_active());
+        hit.consume();
+        assert!(!hit.flicked);
+        assert!(hit.continuous_flick_active());
+    }
+
+    #[test]
     fn low_dpi_small_displacement_retriggers_after_previous_fast_projection() {
         let mut tracker = FlickTracker::new(200, 0., Point::new(0., 0.), true);
         tracker.push(1. / 120., Point::new(0.2, 0.));
@@ -2907,8 +3005,8 @@ mod replica_input_tests {
     fn orphan_move_rebind_starts_from_zero_velocity() {
         let mut trackers = HashMap::new();
         let position = vec2(0.75 * PHIGROS_X_UNIT as f32, -0.25 * PHIGROS_X_UNIT as f32);
-        assert!(rebind_official_flick_tracker(&mut trackers, 4, 380, 1., position, PHIGROS_X_UNIT));
-        assert!(!rebind_official_flick_tracker(&mut trackers, 4, 380, 2., vec2(9., 9.), PHIGROS_X_UNIT));
+        assert!(rebind_official_flick_tracker(&mut trackers, 4, 380, 1., position, PHIGROS_X_UNIT, None));
+        assert!(!rebind_official_flick_tracker(&mut trackers, 4, 380, 2., vec2(9., 9.), PHIGROS_X_UNIT, None));
 
         let tracker = trackers.get_mut(&4).unwrap();
         tracker.push(1. + 1. / 60., to_phigros_motion_point(position, PHIGROS_X_UNIT));
@@ -3094,10 +3192,13 @@ mod custom_combo_score_tests {
             inner.custom_scheme = Some(scheme.clone());
             assert_eq!(inner.score(), score);
         }
+        inner.custom_extra_score = 1234;
+        assert_eq!(inner.score(), 401234);
         inner.custom_counts = [1, 2, 3, 4, 5, 6, 7, 8, 9];
         assert_eq!(inner.result().custom_counts.iter().map(|(_, c)| *c).sum::<u32>(), 45);
         inner.reset();
         assert!(inner.result().custom_counts.is_empty());
         assert!(inner.custom_counts.iter().all(|c| *c == 0));
+        assert_eq!(inner.custom_extra_score, 0);
     }
 }

@@ -30,6 +30,7 @@ enum Phase {
 
 pub struct ChallengeScene {
     charts: [ChartItem; 3],
+    record_single_scores: bool,
     progress: ChallengeProgress,
     phase: Phase,
     waiting: bool,
@@ -46,9 +47,10 @@ pub struct ChallengeScene {
     target: Option<RenderTarget>,
 }
 impl ChallengeScene {
-    pub fn new(charts: [ChartItem; 3]) -> Self {
+    pub fn new(charts: [ChartItem; 3], record_single_scores: bool) -> Self {
         Self {
             charts,
+            record_single_scores,
             progress: ChallengeProgress::default(),
             phase: Phase::Playing,
             waiting: false,
@@ -296,8 +298,10 @@ impl Scene for ChallengeScene {
                         if i >= 3 {
                             return Ok(());
                         }
-                        if let Err(error) = self.save_local_result(i, &result) {
-                            show_error(error);
+                        if self.record_single_scores {
+                            if let Err(error) = self.save_local_result(i, &result) {
+                                show_error(error);
+                            }
                         }
                         let chart = &self.charts[i];
                         self.progress.complete(ChallengeResult {

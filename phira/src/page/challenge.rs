@@ -11,7 +11,7 @@ pub const ENTRY_WIDTH: f32 = 0.24 + 0.018 + 0.14;
 pub struct ChallengePanel {
     pub active: bool,
     pub selected: crate::challenge::ChallengeSelection<ChartItem>,
-    pub start: Option<[ChartItem; 3]>,
+    pub start: Option<([ChartItem; 3], bool)>,
     entry: DRectButton,
     badge: DRectButton,
     cancel: DRectButton,
@@ -20,6 +20,8 @@ pub struct ChallengePanel {
     positions: [DRectButton; 3],
     remove: [DRectButton; 3],
     begin: DRectButton,
+    record_single_scores_btn: DRectButton,
+    record_single_scores: bool,
     entry_ready: bool,
     area: Rect,
     picker: BadgePicker,
@@ -39,6 +41,8 @@ impl ChallengePanel {
             positions: std::array::from_fn(|_| DRectButton::new()),
             remove: std::array::from_fn(|_| DRectButton::new()),
             begin: DRectButton::new(),
+            record_single_scores_btn: DRectButton::new(),
+            record_single_scores: false,
             entry_ready: false,
             area: Rect::new(0., 0., 0., 0.),
             picker: BadgePicker::default(),
@@ -116,6 +120,7 @@ impl ChallengePanel {
         if !self.active {
             if self.entry_ready && self.entry.touch(touch, t) {
                 self.active = true;
+                self.record_single_scores = false;
                 self.selected = Default::default();
                 self.restoring.clear();
                 for (i, saved) in get_data().challenge_selection.iter().enumerate() {
@@ -185,6 +190,10 @@ impl ChallengePanel {
             prpr::scene::show_message("课题选择已保存").ok();
             return Ok(true);
         }
+        if self.record_single_scores_btn.touch(touch, t) {
+            self.record_single_scores = !self.record_single_scores;
+            return Ok(true);
+        }
         for i in 0..3 {
             if self.positions[i].touch(touch, t) {
                 self.selected.focused = i;
@@ -196,7 +205,7 @@ impl ChallengePanel {
             }
         }
         if self.ready() && self.begin.touch(touch, t) {
-            self.start = self.selected.course();
+            self.start = self.selected.course().map(|charts| (charts, self.record_single_scores));
             return Ok(true);
         }
         Ok(self.area.contains(touch.position))
@@ -252,6 +261,20 @@ impl ChallengePanel {
                     .color(GRAY)
                     .draw();
             }
+            ui.text("记录单曲成绩")
+                .pos(0.865, y + 0.112)
+                .anchor(0.5, 0.5)
+                .no_baseline()
+                .size(0.27)
+                .draw();
+            self.record_single_scores_btn.render_text(
+                ui,
+                Rect::new(0.80, y + 0.155, 0.13, 0.065),
+                t,
+                if self.record_single_scores { "是" } else { "否" },
+                0.4,
+                self.record_single_scores,
+            );
         }
         self.picker.render(ui, t);
     }

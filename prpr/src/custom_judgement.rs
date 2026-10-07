@@ -20,6 +20,7 @@ const BOUNDARIES: [f64; 9] = [180., 165., 150., 115., 80., -80., -115., -150., -
 pub struct Band {
     pub label: String,
     pub contribution: f64,
+    pub extra_score: u32,
     pub effect_enabled: bool,
     pub color: [u8; 4],
     pub effect_size: f32,
@@ -29,6 +30,7 @@ impl Default for Band {
         Self {
             label: "perfect".into(),
             contribution: 1.,
+            extra_score: 0,
             effect_enabled: true,
             color: [255, 236, 159, 225],
             effect_size: 1.,
@@ -41,6 +43,10 @@ pub struct Scheme {
     pub name: String,
     pub counts_local_score: bool,
     pub combo_score_ratio: f64,
+    /// Phigros Flick trigger speed at 380 DPI. The stock value is 0.30.
+    pub flick_speed_threshold: f64,
+    /// Keep the stock consume/re-arm Flick behaviour when true.
+    pub flick_require_direction_change: bool,
     pub boundaries_ms: Vec<f64>,
     pub bands: Vec<Band>,
 }
@@ -70,6 +76,8 @@ impl Scheme {
             name: "新方案".into(),
             counts_local_score: false,
             combo_score_ratio: 0.1,
+            flick_speed_threshold: 0.30,
+            flick_require_direction_change: true,
             boundaries_ms: boundary_indices.iter().map(|&i| BOUNDARIES[i]).collect(),
             bands: indices
                 .iter()
@@ -89,6 +97,7 @@ impl Scheme {
                     Band {
                         label: label.into(),
                         contribution,
+                        extra_score: 0,
                         color,
                         effect_enabled: i != 0 && i != 8,
                         effect_size: 1.,
@@ -100,6 +109,9 @@ impl Scheme {
     pub fn validate(&self) -> Result<(), String> {
         if !self.combo_score_ratio.is_finite() || !(0.0..=1.0).contains(&self.combo_score_ratio) {
             return Err("连击分数占比必须在 0% 到 100% 之间".into());
+        }
+        if !self.flick_speed_threshold.is_finite() || self.flick_speed_threshold < 0. {
+            return Err("Flick滑动速度阈值必须是非负有限数值".into());
         }
         if ![5, 7, 9].contains(&self.bands.len()) || self.boundaries_ms.len() != self.bands.len() {
             return Err("档位与边界数量不匹配".into());
@@ -164,6 +176,8 @@ impl Scheme {
         next.name = self.name.clone();
         next.counts_local_score = self.counts_local_score;
         next.combo_score_ratio = self.combo_score_ratio;
+        next.flick_speed_threshold = self.flick_speed_threshold;
+        next.flick_require_direction_change = self.flick_require_direction_change;
         for band in &mut next.bands {
             if let Some(old) = self.bands.iter().find(|x| x.label == band.label) {
                 *band = old.clone();
@@ -339,9 +353,19 @@ mod score_ratio_tests {
     fn legacy_presets_default_to_ten_percent_and_ratio_survives_layout_changes() {
         let mut scheme: Scheme = serde_json::from_str(r#"{"name":"旧方案"}"#).unwrap();
         assert_eq!(scheme.combo_score_ratio, 0.1);
+        assert_eq!(scheme.flick_speed_threshold, 0.30);
+        assert!(scheme.flick_require_direction_change);
+        assert!(scheme.bands.iter().all(|band| band.extra_score == 0));
         scheme.combo_score_ratio = 0.35;
+        scheme.flick_speed_threshold = 0.55;
+        scheme.flick_require_direction_change = false;
+        let mid = scheme.bands.len() / 2;
+        scheme.bands[mid].extra_score = 123;
         scheme.change_count(9);
         assert_eq!(scheme.combo_score_ratio, 0.35);
+        assert_eq!(scheme.flick_speed_threshold, 0.55);
+        assert!(!scheme.flick_require_direction_change);
+        assert_eq!(scheme.bands[scheme.bands.len() / 2].extra_score, 123);
         let restored: Scheme = serde_json::from_str(&serde_json::to_string(&scheme).unwrap()).unwrap();
         assert_eq!(restored.combo_score_ratio, 0.35);
         for ratio in [0., 1.] {
