@@ -30,7 +30,7 @@ PhiraiAd 在原版 Phira 的基础上增加或修改了多项练习、判定和�
 
 ## 适配版本
 
-当前v1.5.0版本适配安卓、windows、ios (ios的ipa文件需要自行签名按照，不计划上AppleStore)。
+当前v1.5.1版本适配安卓、windows、ios (ios的ipa文件需要自行签名按照，不计划上AppleStore)。
 
 ## 下载
 

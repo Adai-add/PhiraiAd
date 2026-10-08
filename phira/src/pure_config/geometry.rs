@@ -700,8 +700,11 @@ pub fn fade(data: &mut Value, bpm: &BpmMap, g: &Geometry, end: f64, progress: &s
             }
             layers[0]["alphaEvents"] = Value::Array(events);
             for layer in &mut layers[1..] {
-                if layer.is_object() {
-                    layer["alphaEvents"] = json!([]);
+                if let Some(layer) = layer.as_object_mut() {
+                    // The first layer now contains the combined final alpha.
+                    // Omit other alpha tracks: an empty array becomes an empty
+                    // chained animation in existing RPE readers and can panic.
+                    layer.remove("alphaEvents");
                 }
             }
         }
@@ -713,6 +716,22 @@ pub fn fade(data: &mut Value, bpm: &BpmMap, g: &Geometry, end: f64, progress: &s
 #[cfg(test)]
 mod performance_tests {
     use super::*;
+    #[test]
+    fn baked_alpha_omits_later_tracks_and_keeps_other_events() {
+        let bpm = BpmMap::new(&json!([{"bpm":120,"startTime":[0,0,1]}])).unwrap();
+        let mut line = super::super::static_line(vec![], 11., 4.);
+        let extra = json!({"alphaEvents":[event(0.,4.,20.,20.)],
+            "moveXEvents":[event(0.,4.,10.,10.)],"rotateEvents":[event(0.,4.,0.,0.)]});
+        line["eventLayers"].as_array_mut().unwrap().push(extra.clone());
+        let mut data = json!({"META":{"RPEVersion":160},"judgeLineList":[line]});
+        let g = Geometry::new(&data, &bpm, false).unwrap();
+        fade(&mut data, &bpm, &g, 2., &super::super::Progress::default()).unwrap();
+        let layers = &data["judgeLineList"][0]["eventLayers"];
+        assert!(!array(&layers[0]["alphaEvents"]).is_empty());
+        assert!(layers[1].get("alphaEvents").is_none());
+        assert_eq!(layers[1]["moveXEvents"], extra["moveXEvents"]);
+        assert_eq!(layers[1]["rotateEvents"], extra["rotateEvents"]);
+    }
     #[test]
     fn cached_world_preserves_parent_transform_operation_order() {
         let bpm = BpmMap::new(&json!([{"bpm":120,"startTime":[0,0,1]}])).unwrap();
