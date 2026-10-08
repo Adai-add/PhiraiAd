@@ -868,9 +868,15 @@ impl SongScene {
             self.menu_options.push("review-del");
         }
         if self.local_path.as_ref().is_some_and(|it| !it.starts_with(':')) {
+            self.menu_options.push("pure-config");
             self.menu_options.push("export");
         }
-        self.menu.set_options(self.menu_options.iter().map(|it| tl!(*it).into_owned()).collect());
+        self.menu.set_options(
+            self.menu_options
+                .iter()
+                .map(|it| if *it == "pure-config" { "生成纯配置谱面".to_owned() } else { tl!(*it).into_owned() })
+                .collect(),
+        );
     }
 
     fn launch(&mut self, mode: GameMode, force_unlock: bool) -> Result<()> {
@@ -1656,6 +1662,18 @@ impl SongScene {
 
 impl Scene for SongScene {
     fn on_result(&mut self, tm: &mut TimeManager, res: Box<dyn Any>) -> Result<()> {
+        let res = match res.downcast::<crate::pure_config::Generated>() {
+            Ok(generated) => {
+                match generated.register() {
+                    Ok(()) => {
+                        show_message("纯配置谱面已加入谱面库").ok();
+                    }
+                    Err(error) => show_error(error),
+                }
+                return Ok(());
+            }
+            Err(res) => res,
+        };
         let res = match res.downcast::<SimpleRecord>() {
             Err(res) => res,
             Ok(rec) => {
@@ -2216,6 +2234,11 @@ impl Scene for SongScene {
                 }
                 "stabilize-deny" => {
                     request_input("stabilize-deny-reason", InputBox::new().mode(InputMode::Multiline));
+                }
+                "pure-config" => {
+                    if let Some(path) = self.local_path.clone() {
+                        self.next_scene = Some(NextScene::Overlay(Box::new(crate::pure_config::ConverterScene::new(path)?)));
+                    }
                 }
                 "export" => {
                     request_export(format!("{}.zip", sanitize(&self.info.name)));
@@ -2856,7 +2879,7 @@ impl Scene for SongScene {
                     self.menu.set_bottom(true);
                     self.menu.set_selected(usize::MAX);
                     let d = 0.28;
-                    let h = self.menu_options.len().min(5) as f32 * 0.1;
+                    let h = (self.menu_options.len() as f32 * 0.1).min(0.75);
                     self.menu.show(ui, t, Rect::new(r.x - d, r.bottom() + 0.02, r.w + d, h));
                 }
                 ui.dx(-r.w - 0.03);

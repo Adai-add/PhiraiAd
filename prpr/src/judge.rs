@@ -1630,6 +1630,7 @@ impl Judge {
             .collect();
         noise_touches.sort_by_key(|(id, _)| *id);
         noise_touches.dedup_by_key(|(id, _)| *id);
+        chart.update_noise_areas(res);
         self.noise_state.update(
             &chart.extra.block_areas,
             &noise_touches,

@@ -7,7 +7,10 @@ use crate::core::Resource;
 use anyhow::{ensure, Result};
 use macroquad::prelude::*;
 use miniquad::{BlendFactor, BlendState, BlendValue, Equation, PipelineParams, UniformType};
-use std::{cell::Cell, collections::{HashMap, HashSet}};
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+};
 /// Project noise geometry with the exact camera used for the chart. UVs are
 /// local to the full render target, including its letterboxed chart viewport.
 fn block_screen_uv(p: Vec2, aspect: f32, flip_x: bool, projection: Mat4, vp: (i32, i32, i32, i32), size: Vec2) -> Vec2 {
@@ -108,6 +111,7 @@ fn canvas_shader(vert: &str, frag: &str) -> (String, String) {
     let mut frag = frag.to_owned();
     let mut changed = false;
     for name in [
+        "_NoiseColorRT",
         "_MaskRT",
         "_EffectRT",
         "_SceneColor",
@@ -146,6 +150,21 @@ fn canvas_shader(vert: &str, frag: &str) -> (String, String) {
     }
     (format!("{header}uniform vec4 NoiseDomain;\nvoid main(){body}"), frag)
 }
+
+/// Preserve the extracted material's brightness and procedural passes; only
+/// replace its hue when the per-cell Recorder color has an opaque alpha.
+fn recorder_shader(source: &str) -> String {
+    let mut source = source.to_owned();
+    for name in ["_FillColor", "_EdgeColor", "_GlowColor", "_SparkTint", "_NoiseTint", "_TouchGlowColor"] {
+        let old = format!("{name}.xyz");
+        let new = format!("mix({old}, recorderTint.rgb * max(max({name}.x,{name}.y),{name}.z), recorderTint.a)");
+        source = source.replace(&old, &new);
+    }
+    source
+        .replacen("void main()", "uniform sampler2D _NoiseColorRT;\nvoid main()", 1)
+        .replacen("void main()\n{", "void main()\n{\nvec4 recorderTint = texture2D(_NoiseColorRT,vs_TEXCOORD0.xy);", 1)
+}
+const FLAT_COLOR: &str = "#version 100\nprecision mediump float; varying vec4 col; void main(){gl_FragColor=col;}";
 
 const VERT: &str = r#"#version 100
 attribute vec3 position; attribute vec2 texcoord; attribute vec4 color0;
@@ -649,81 +668,91 @@ impl NoiseRenderer {
         profiler.frame(true, false, w as u32, h as u32);
         let timing = profiler.begin(0);
         let t = res.time as f32;
-        let mut normal: [Vec<([Vec2; 4], f32)>; 3] = std::array::from_fn(|_| Vec::new());
-        let mut holes: [Vec<[Vec2; 4]>; 3] = std::array::from_fn(|_| Vec::new());
-        let mut adjusted_normal = Vec::new();
-        let mut adjusted_holes = Vec::new();
-        for area in areas.iter().filter(|a| a.visible(t)) {
-            let phase = if area.active(t) {
-                0
-            } else if area.ready(t) {
-                1
-            } else {
-                2
-            };
-            let pose = area.pose(t, res.aspect_ratio);
-            // Pose::contains rejects both axes if either is degenerate.
-            if pose.size.x.abs() < 0.0001 || pose.size.y.abs() < 0.0001 {
-                continue;
+        let mut pieces = Vec::new();
+        let mut blocking_shape = Vec::new();
+        if areas.iter().any(|a| a.recorder.is_some()) {
+            let (composed, boundaries) = composed_pieces(areas, t, res.aspect_ratio, |p| EffectRenderer::screen_uv(p, res, vp, w, h, projection));
+            for piece in composed {
+                if piece.phase == 0 {
+                    blocking_shape.push(piece.polygon.clone());
+                }
+                pieces.push((piece.polygon, piece.fade, piece.phase == 0, boundaries.clone(), piece.color.unwrap_or(RED)));
             }
-            let points = pose.corners().map(|p| EffectRenderer::screen_uv(p, res, vp, w, h, projection));
-            if !points.iter().all(|p| p.is_finite()) {
-                continue;
-            }
-            let fade = if phase == 2 && t < area.enable_time {
-                ((t - area.appear_time) / 0.5).clamp(0., 1.)
-            } else {
-                1.
-            };
-            if phase == 0 {
-                let adjusted = adjusted_pose(pose, area.is_subtract);
-                let points = adjusted.corners().map(|p| EffectRenderer::screen_uv(p, res, vp, w, h, projection));
-                if points.iter().all(|p| p.is_finite()) {
-                    if area.is_subtract {
-                        adjusted_holes.push(points);
-                    } else {
-                        adjusted_normal.push(points);
+        } else {
+            let mut normal: [Vec<([Vec2; 4], f32)>; 3] = std::array::from_fn(|_| Vec::new());
+            let mut holes: [Vec<[Vec2; 4]>; 3] = std::array::from_fn(|_| Vec::new());
+            let mut adjusted_normal = Vec::new();
+            let mut adjusted_holes = Vec::new();
+            for area in areas.iter().filter(|a| a.visible(t)) {
+                let phase = if area.active(t) {
+                    0
+                } else if area.ready(t) {
+                    1
+                } else {
+                    2
+                };
+                let pose = area.pose(t, res.aspect_ratio);
+                // Pose::contains rejects both axes if either is degenerate.
+                if pose.size.x.abs() < 0.0001 || pose.size.y.abs() < 0.0001 {
+                    continue;
+                }
+                let points = pose.corners().map(|p| EffectRenderer::screen_uv(p, res, vp, w, h, projection));
+                if !points.iter().all(|p| p.is_finite()) {
+                    continue;
+                }
+                let fade = if phase == 2 && t < area.enable_time {
+                    ((t - area.appear_time) / 0.5).clamp(0., 1.)
+                } else {
+                    1.
+                };
+                if phase == 0 {
+                    let adjusted = adjusted_pose(pose, area.is_subtract);
+                    let points = adjusted.corners().map(|p| EffectRenderer::screen_uv(p, res, vp, w, h, projection));
+                    if points.iter().all(|p| p.is_finite()) {
+                        if area.is_subtract {
+                            adjusted_holes.push(points);
+                        } else {
+                            adjusted_normal.push(points);
+                        }
                     }
                 }
-            }
-            if area.is_subtract {
-                holes[phase].push(points);
-            } else {
-                normal[phase].push((points, fade));
-            }
-        }
-        let mut pieces = Vec::new();
-        let screen = [vec2(0., 0.), vec2(1., 0.), vec2(1., 1.), vec2(0., 1.)];
-        // Assign overlapping pixels once, prioritizing real blocking over previews.
-        let mut painted = Vec::new();
-        let mut blocking_shape = Vec::new();
-        for phase in [0, 1, 2] {
-            let normals: Vec<_> = normal[phase].iter().map(|(p, _)| *p).collect();
-            let mut fragments = mask_polygons(&normals, &holes[phase], &screen);
-            let mut boundaries: Vec<_> = normals.iter().chain(&holes[phase]).copied().collect();
-            if phase == 0 {
-                // Exactly (normal union XOR subtract parity) AND its adjusted
-                // counterpart, matching blocked() rather than ordinary subtraction.
-                let adjusted = mask_polygons(&adjusted_normal, &adjusted_holes, &screen);
-                fragments = intersect_sets(&fragments, &adjusted);
-                blocking_shape.clone_from(&fragments);
-                boundaries.extend(adjusted_normal.iter().chain(&adjusted_holes).copied());
-            }
-            fragments = difference(fragments, &painted);
-            painted.extend(fragments.iter().cloned());
-            for poly in fragments {
-                let center = poly.iter().copied().sum::<Vec2>() / poly.len() as f32;
-                let fade = if phase == 0 {
-                    1.
+                if area.is_subtract {
+                    holes[phase].push(points);
                 } else {
-                    normal[phase]
-                        .iter()
-                        .filter(|(p, _)| inside_convex(center, p))
-                        .map(|(_, f)| *f)
-                        .reduce(f32::max)
-                        .unwrap_or(1.)
-                };
-                pieces.push((poly, fade, phase == 0, boundaries.clone()));
+                    normal[phase].push((points, fade));
+                }
+            }
+            let screen = [vec2(0., 0.), vec2(1., 0.), vec2(1., 1.), vec2(0., 1.)];
+            // Assign overlapping pixels once, prioritizing real blocking over previews.
+            let mut painted = Vec::new();
+            for phase in [0, 1, 2] {
+                let normals: Vec<_> = normal[phase].iter().map(|(p, _)| *p).collect();
+                let mut fragments = mask_polygons(&normals, &holes[phase], &screen);
+                let mut boundaries: Vec<_> = normals.iter().chain(&holes[phase]).copied().collect();
+                if phase == 0 {
+                    // Exactly (normal union XOR subtract parity) AND its adjusted
+                    // counterpart, matching blocked() rather than ordinary subtraction.
+                    let adjusted = mask_polygons(&adjusted_normal, &adjusted_holes, &screen);
+                    fragments = intersect_sets(&fragments, &adjusted);
+                    blocking_shape.clone_from(&fragments);
+                    boundaries.extend(adjusted_normal.iter().chain(&adjusted_holes).copied());
+                }
+                fragments = difference(fragments, &painted);
+                painted.extend(fragments.iter().cloned());
+                for poly in fragments {
+                    let center = poly.iter().copied().sum::<Vec2>() / poly.len() as f32;
+                    let fade = if phase == 0 {
+                        1.
+                    } else {
+                        normal[phase]
+                            .iter()
+                            .filter(|(p, _)| inside_convex(center, p))
+                            .map(|(_, f)| *f)
+                            .reduce(f32::max)
+                            .unwrap_or(1.)
+                    };
+                    pieces.push((poly, fade, phase == 0, boundaries.clone(), RED));
+                }
             }
         }
         profiler.end(timing);
@@ -737,13 +766,13 @@ impl NoiseRenderer {
             gl_use_default_material();
         }
         let timing = profiler.begin(11);
-        for (poly, fade, blocking, boundaries) in pieces {
+        for (poly, fade, blocking, boundaries, tint) in pieces {
             let vertices: Vec<_> = poly
                 .iter()
                 .map(|p| macroquad::models::Vertex {
                     position: vec3(p.x * 2. - 1., p.y * 2. - 1., 0.),
                     uv: Vec2::ZERO,
-                    color: Color::new(1., 0., 0., (if blocking { 0.40 } else { 0.05 }) * fade),
+                    color: Color::new(tint.r, tint.g, tint.b, (if blocking { 0.40 } else { 0.05 }) * fade),
                 })
                 .collect();
             let indices: Vec<u16> = (1..poly.len().saturating_sub(1)).flat_map(|i| [0, i as u16, (i + 1) as u16]).collect();
@@ -774,7 +803,7 @@ impl NoiseRenderer {
                 if side_a == side_b {
                     continue;
                 } // Never outline internal partitions/overlaps.
-                EffectRenderer::mesh([a - n, b - n, b + n, a + n], Color::new(1., 0., 0., 0.8 * fade), None);
+                EffectRenderer::mesh([a - n, b - n, b + n, a + n], Color::new(tint.r, tint.g, tint.b, 0.8 * fade), None);
             }
         }
         unsafe { get_internal_gl() }.flush();
@@ -961,8 +990,133 @@ fn mask_polygons(normals: &[[Vec2; 4]], subtracts: &[[Vec2; 4]], screen: &[Vec2;
     xor.extend(difference(parity, &union));
     xor
 }
+/// Split with the existing convex clipping helpers, then classify each cell.
+/// This keeps Recorder's "exactly one inverse" rule separate from the official
+/// parity rule. Either format can contribute a blocked cell in mixed charts.
+struct NoisePiece {
+    polygon: Vec<Vec2>,
+    phase: usize,
+    fade: f32,
+    color: Option<Color>,
+}
+fn composed_pieces(areas: &[BlockArea], t: f32, aspect: f32, project: impl Fn(Vec2) -> Vec2) -> (Vec<NoisePiece>, Vec<[Vec2; 4]>) {
+    struct Region<'a> {
+        area: &'a BlockArea,
+        polygon: [Vec2; 4],
+        adjusted: [Vec2; 4],
+        phase: usize,
+    }
+    let regions: Vec<_> = areas
+        .iter()
+        .filter(|a| a.visible(t))
+        .filter_map(|area| {
+            let pose = area.pose(t, aspect);
+            if pose.size.x < 0.0001 || pose.size.y < 0.0001 {
+                return None;
+            }
+            let polygon = pose.corners().map(&project);
+            let adjusted = adjusted_pose(pose, area.is_subtract).corners().map(&project);
+            if !polygon.iter().chain(&adjusted).all(|p| p.is_finite()) {
+                return None;
+            }
+            Some(Region {
+                area,
+                polygon,
+                adjusted,
+                phase: if area.active(t) {
+                    0
+                } else if area.ready(t) {
+                    1
+                } else {
+                    2
+                },
+            })
+        })
+        .collect();
+    let boundaries: Vec<_> = regions
+        .iter()
+        .flat_map(|r| std::iter::once(r.polygon).chain((r.phase == 0).then_some(r.adjusted)))
+        .collect();
+    let mut cells = vec![vec![vec2(0., 0.), vec2(1., 0.), vec2(1., 1.), vec2(0., 1.)]];
+    for boundary in &boundaries {
+        cells = cells
+            .into_iter()
+            .flat_map(|cell| {
+                let inner = intersection(cell.clone(), boundary);
+                if inner.is_empty() {
+                    return vec![cell];
+                }
+                let mut parts = subtract_polygon(cell, boundary);
+                parts.push(inner);
+                parts
+            })
+            .filter(|p| p.len() >= 3 && polygon_area(p).abs() > 1e-10)
+            .collect();
+    }
+    let mut pieces = Vec::new();
+    for polygon in cells {
+        let center = polygon.iter().copied().sum::<Vec2>() / polygon.len() as f32;
+        let mut source = None;
+        let mut priority = None;
+        for r in &regions {
+            if inside_convex(center, &r.polygon) {
+                if let Some(recorder) = &r.area.recorder {
+                    let rank = (recorder.z_order, recorder.line);
+                    if priority.is_none_or(|old| rank > old) {
+                        priority = Some(rank);
+                        source = Some(recorder.color);
+                    }
+                }
+            }
+        }
+        for phase in 0..3 {
+            let mut normal = [false; 2];
+            let mut inverse = [0usize; 2];
+            let mut adjusted_normal = [false; 2];
+            let mut adjusted_inverse = [0usize; 2];
+            let mut fade: f32 = 0.;
+            for r in regions.iter().filter(|r| r.phase == phase) {
+                let format = usize::from(r.area.recorder.is_some());
+                let inside = inside_convex(center, &r.polygon);
+                let adjusted = inside_convex(center, &r.adjusted);
+                if r.area.is_subtract {
+                    inverse[format] += usize::from(inside);
+                    adjusted_inverse[format] += usize::from(adjusted);
+                } else {
+                    normal[format] |= inside;
+                    adjusted_normal[format] |= adjusted;
+                }
+                if inside {
+                    fade = fade.max(r.area.fade(t));
+                }
+            }
+            let covered = |format: usize| {
+                let flip = if format == 0 { inverse[format] % 2 == 1 } else { inverse[format] == 1 };
+                let adjusted_flip = if format == 0 {
+                    adjusted_inverse[format] % 2 == 1
+                } else {
+                    adjusted_inverse[format] == 1
+                };
+                (normal[format] ^ flip) && (phase != 0 || (adjusted_normal[format] ^ adjusted_flip))
+            };
+            if covered(0) || covered(1) {
+                pieces.push(NoisePiece {
+                    polygon,
+                    phase,
+                    fade: if phase == 0 { 1. } else { fade },
+                    color: source,
+                });
+                break;
+            }
+        }
+    }
+    (pieces, boundaries)
+}
+
 struct EffectRenderer {
     programs: Vec<Program>,
+    color_program: Program,
+    color_target: Option<RenderTarget>,
     canvas: Option<NoiseCanvas>,
     overlay_output: Option<RenderTarget>,
     sprite: Program,
@@ -1022,6 +1176,8 @@ impl EffectRenderer {
         touch.set_filter(FilterMode::Linear);
         tracing::info!(stage = "textures_ready", "noise-area initialization");
         let mut renderer = Self {
+            color_program: Program::new(VERT, FLAT_COLOR, None)?,
+            color_target: None,
             canvas: None,
             overlay_output: None,
             programs: vec![
@@ -1035,10 +1191,14 @@ impl EffectRenderer {
                 // Premultiplied-over would erase the chart because its alpha is 1.
                 Program::new(
                     include_str!("shaders/DisabledBlock_program_0.vert"),
-                    include_str!("shaders/DisabledBlock_program_0.glsl"),
+                    &recorder_shader(include_str!("shaders/DisabledBlock_program_0.glsl")),
                     Some(BlendState::new(Equation::Add, BlendFactor::One, BlendFactor::One)),
                 )?,
-                program!("ActiveBlock_program_0"),
+                Program::new(
+                    include_str!("shaders/ActiveBlock_program_0.vert"),
+                    &recorder_shader(include_str!("shaders/ActiveBlock_program_0.glsl")),
+                    blend,
+                )?,
             ],
             sprite: Program::new(VERT, SPRITE, Some(BlendState::new(Equation::Add, BlendFactor::Value(BlendValue::SourceAlpha), BlendFactor::One)))?,
             hover_sprite: Program::new(VERT, &SPRITE.replace("texture2D(Texture,uv)*col", "vec4(texture2D(Texture,uv).a) * col"), blend)?,
@@ -1088,7 +1248,7 @@ impl EffectRenderer {
                 }
             })
             .await;
-            let shader = active_variant(no_touch, no_distortion, low, ready_only);
+            let shader = recorder_shader(&active_variant(no_touch, no_distortion, low, ready_only));
             let pr = Program::new(include_str!("shaders/ActiveBlock_program_0.vert"), &shader, blend)?;
             pr.props(&props["5"]);
             renderer.variants.push(pr);
@@ -1194,6 +1354,18 @@ impl EffectRenderer {
             self.precise_enabled = precise;
             self.low_enabled = low;
         }
+        if areas.iter().any(|a| a.recorder.is_some())
+            && self
+                .color_target
+                .is_none_or(|target| target.texture.width() != w as f32 || target.texture.height() != h as f32)
+        {
+            if let Some(old) = self.color_target.take() {
+                old.render_pass.delete(unsafe { get_internal_gl() }.quad_context);
+            }
+            let color = render_target(w, h);
+            color.texture.set_filter(FilterMode::Nearest);
+            self.color_target = Some(color);
+        }
         let rt = &self.targets.as_ref().unwrap().targets;
         let t = res.time as f32;
         let cv = res.camera.viewport.unwrap_or(full_vp);
@@ -1204,27 +1376,38 @@ impl EffectRenderer {
         for group in &mut self.geometry {
             group.clear();
         }
-        for area in areas.iter().filter(|area| area.visible(t)) {
-            let phase = if area.active(t) {
-                0
-            } else if area.ready(t) {
-                2
-            } else {
-                4
-            };
-            let fade = if phase == 4 && t < area.enable_time {
-                ((t - area.appear_time) / 0.5).clamp(0., 1.)
-            } else {
-                1.
-            };
-            self.geometry[phase + usize::from(area.is_subtract)].push(ScreenQuad {
-                points: area
-                    .pose(t, res.aspect_ratio)
-                    .corners()
-                    .map(|p| Self::screen_uv(p, res, vp, w as f32, h as f32, projection)),
-                color: Color::new(1., if area.is_subtract { fade } else { 1. }, 1., if area.is_subtract { 0.1 } else { fade }),
-            });
-        }
+        let recorder = areas.iter().any(|a| a.recorder.is_some());
+        let pieces = if recorder {
+            let (pieces, _) = composed_pieces(areas, t, res.aspect_ratio, |p| Self::screen_uv(p, res, vp, w as f32, h as f32, projection));
+            for piece in &pieces {
+                for i in 1..piece.polygon.len() - 1 {
+                    self.geometry[piece.phase * 2].push(ScreenQuad {
+                        points: [piece.polygon[0], piece.polygon[i], piece.polygon[i + 1], piece.polygon[i + 1]],
+                        color: Color::new(1., 1., 1., piece.fade),
+                    });
+                }
+            }
+            pieces
+        } else {
+            for area in areas.iter().filter(|area| area.visible(t)) {
+                let phase = if area.active(t) {
+                    0
+                } else if area.ready(t) {
+                    2
+                } else {
+                    4
+                };
+                let fade = area.fade(t);
+                self.geometry[phase + usize::from(area.is_subtract)].push(ScreenQuad {
+                    points: area
+                        .pose(t, res.aspect_ratio)
+                        .corners()
+                        .map(|p| Self::screen_uv(p, res, vp, w as f32, h as f32, projection)),
+                    color: Color::new(1., if area.is_subtract { fade } else { 1. }, 1., if area.is_subtract { 0.1 } else { fade }),
+                });
+            }
+            Vec::new()
+        };
         self.profiler.end(geometry_timing);
         let reuse_groups: [bool; 6] = reusable_geometry(self.static_cache_valid, &self.cached_geometry, &self.geometry);
         let active = !self.geometry[0].is_empty() || !self.geometry[1].is_empty();
@@ -1271,6 +1454,39 @@ impl EffectRenderer {
         let mut tex = [self.blank; 21];
         push_camera_state();
         let result = (|| -> Result<()> {
+            let color_texture = if recorder {
+                let target = self.color_target.unwrap();
+                Self::camera(target);
+                // Continue the carrier hue outside its fill so the existing
+                // glow and edge passes retain it too. Mixed charts use the
+                // original material outside their explicitly colored cells.
+                let fallback = if areas.iter().all(|a| a.recorder.is_some()) {
+                    areas
+                        .iter()
+                        .filter(|a| a.visible(t))
+                        .filter_map(|a| a.recorder.as_ref())
+                        .max_by_key(|r| (r.z_order, r.line))
+                        .map_or(BLANK, |r| r.color)
+                } else {
+                    BLANK
+                };
+                clear_background(fallback);
+                gl_use_material(self.color_program.material);
+                for piece in &pieces {
+                    for i in 1..piece.polygon.len() - 1 {
+                        Self::mesh(
+                            [piece.polygon[0], piece.polygon[i], piece.polygon[i + 1], piece.polygon[i + 1]],
+                            piece.color.unwrap_or(BLANK),
+                            None,
+                        );
+                    }
+                }
+                gl_use_default_material();
+                unsafe { get_internal_gl() }.flush();
+                target.texture
+            } else {
+                self.blank
+            };
             for i in [0, 1, 2, 3, 4, 5, 14, 18, 19] {
                 let group = if i >= 18 { i - 18 } else { i };
                 if i == 14 {
@@ -1466,7 +1682,12 @@ impl EffectRenderer {
                 Self::pass(
                     dp,
                     output,
-                    &[("_ComposeRT", tex[20]), ("_DisplaceMap", self.noise), ("_SparkMap", self.spark)],
+                    &[
+                        ("_ComposeRT", tex[20]),
+                        ("_DisplaceMap", self.noise),
+                        ("_SparkMap", self.spark),
+                        ("_NoiseColorRT", color_texture),
+                    ],
                     false,
                     &mut self.profiler,
                     10,
@@ -1505,6 +1726,7 @@ impl EffectRenderer {
                     pr,
                     output,
                     &[
+                        ("_NoiseColorRT", color_texture),
                         ("_MaskRT", rt[15].texture),
                         ("_EffectRT", rt[16].texture),
                         ("_DisplaceMap", self.noise),
@@ -1550,6 +1772,11 @@ impl EffectRenderer {
 }
 impl Drop for EffectRenderer {
     fn drop(&mut self) {
+        if let Some(target) = self.color_target.take() {
+            let mut gl = unsafe { get_internal_gl() };
+            gl.flush();
+            target.render_pass.delete(gl.quad_context);
+        }
         for tex in [self.noise, self.spark, self.grain, self.touch, self.blank] {
             tex.delete();
         }
@@ -1559,6 +1786,115 @@ impl Drop for EffectRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn recorder_area(subtract: bool, line: usize, state: u8, color: Color, pose: super::super::Pose) -> BlockArea {
+        use super::super::recorder::{Marker, RecorderArea};
+        BlockArea {
+            is_subtract: subtract,
+            recorder: Some(Box::new(RecorderArea {
+                line,
+                z_order: 0,
+                anchor: Vec2::splat(0.5),
+                texture_size: Vec2::splat(900.),
+                markers: vec![Marker { time: 0., state }],
+                pose,
+                color,
+            })),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn recorder_masks_match_hit_testing_and_keep_official_parity() {
+        let pose = super::super::Pose {
+            center: Vec2::splat(0.5),
+            size: Vec2::splat(0.7),
+            angle: 0.2,
+        };
+        for normal in [false, true] {
+            for inverses in 0..=4 {
+                let mut areas = Vec::new();
+                if normal {
+                    areas.push(recorder_area(false, 0, 2, RED, pose));
+                }
+                areas.extend((0..inverses).map(|i| recorder_area(true, i + 1, 2, MAGENTA, pose)));
+                let (pieces, _) = composed_pieces(&areas, 1., 1., |p| p);
+                assert_eq!(super::super::blocked(&areas, pose.center, 1., 1.), normal ^ (inverses == 1));
+                for x in 0..31 {
+                    for y in 0..29 {
+                        let p = vec2((x as f32 + 0.37) / 31., (y as f32 + 0.21) / 29.);
+                        let count = pieces.iter().filter(|piece| piece.phase == 0 && inside_convex(p, &piece.polygon)).count();
+                        assert!(count <= 1, "overlapping composed cells");
+                        assert_eq!(count == 1, super::super::blocked(&areas, p, 1., 1.), "{p:?}, normal={normal}, inverses={inverses}");
+                    }
+                }
+            }
+        }
+        let official = BlockArea {
+            bottom_left_percentage: super::super::Point { x: 0., y: 0. },
+            top_right_percentage: super::super::Point { x: 1., y: 1. },
+            is_subtract: true,
+            appear_time: 0.,
+            enable_time: 0.,
+            disable_time: 2.,
+            disappear_time: 2.,
+            ..Default::default()
+        };
+        assert!(super::super::blocked(&vec![official; 3], Vec2::ZERO, 1., 1.));
+    }
+    #[test]
+    fn recorder_color_priority_and_phase_priority() {
+        let pose = super::super::Pose {
+            center: Vec2::splat(0.5),
+            size: Vec2::ONE,
+            angle: 0.,
+        };
+        let mut areas = vec![
+            recorder_area(false, 0, 2, BLUE, pose),
+            recorder_area(true, 1, 2, GREEN, pose),
+            recorder_area(true, 2, 2, MAGENTA, pose),
+        ];
+        let color_at_center = |areas: &[BlockArea]| {
+            composed_pieces(areas, 1., 1., |p| p)
+                .0
+                .into_iter()
+                .find(|p| inside_convex(Vec2::splat(0.5), &p.polygon))
+                .unwrap()
+                .color
+                .unwrap()
+        };
+        assert_eq!(color_at_center(&areas), MAGENTA);
+        areas[0].recorder.as_mut().unwrap().z_order = 1;
+        assert_eq!(color_at_center(&areas), BLUE);
+        areas.push(recorder_area(false, 99, 3, YELLOW, pose));
+        areas[3].recorder.as_mut().unwrap().z_order = 2;
+        assert_eq!(color_at_center(&areas), YELLOW);
+        assert!(composed_pieces(&areas, 1., 1., |p| p)
+            .0
+            .iter()
+            .filter(|p| inside_convex(Vec2::splat(0.5), &p.polygon))
+            .all(|p| p.phase == 0));
+    }
+    #[test]
+    fn recorder_shader_variants_keep_atlas_mapping_and_sampler_budget() {
+        let mut shaders = vec![
+            recorder_shader(include_str!("shaders/DisabledBlock_program_0.glsl")),
+            recorder_shader(include_str!("shaders/ActiveBlock_program_0.glsl")),
+        ];
+        for (a, b, c, d) in [
+            (true, false, false, false),
+            (false, true, false, false),
+            (true, true, false, false),
+            (true, true, false, true),
+        ] {
+            shaders.push(recorder_shader(&active_variant(a, b, c, d)));
+        }
+        for shader in shaders {
+            let (_, mapped) = canvas_shader(VERT, &shader);
+            assert!(mapped.contains("vec4 recorderTint = noiseSample(_NoiseColorRT,vs_TEXCOORD0.xy)"));
+            assert!(mapped.contains("mix(_FillColor.xyz, recorderTint.rgb"));
+            let re = regex::Regex::new(r"uniform\s+(?:(?:mediump|highp|lowp)\s+)?sampler2D").unwrap();
+            assert!(re.find_iter(&mapped).count() <= 8);
+        }
+    }
     #[test]
     fn native_overlay_only_runs_for_scaled_practice() {
         for scale in [5., 50., 99.999, 100., 200., -100.] {

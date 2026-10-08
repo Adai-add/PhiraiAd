@@ -233,6 +233,18 @@ impl RectButton {
         false
     }
 
+    /// Feed a button from Ui's allowed viewport contacts. Other fingers' end or
+    /// cancel events must not release the captured finger, and handled events
+    /// must not fall through to another overlay.
+    pub(crate) fn consume_touch(&mut self, touch: &Touch) -> (bool, bool) {
+        if touch.phase != TouchPhase::Started && self.id != Some(touch.id) {
+            return (false, false);
+        }
+        let owned = self.id == Some(touch.id);
+        let clicked = self.touch(touch);
+        (owned || self.id == Some(touch.id) || clicked, clicked)
+    }
+
     pub fn long_touch(&mut self, touch: &Touch, t: f32, state: &mut LongTouchState) -> bool {
         match touch.phase {
             TouchPhase::Started => {
@@ -766,16 +778,27 @@ impl<'a> Ui<'a> {
     /// Screen-space overlay input must not inherit a chart/offscreen viewport.
     /// Keep only events still allowed by SceneManager (dialogs may consume them).
     pub(crate) fn screen_touch_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.touch_viewport_scope(self.viewport, f)
+    }
+
+    /// Rebuild allowed contacts from raw pixels in the viewport that draws the
+    /// controls. SceneManager's cached coordinates may belong to another camera.
+    pub(crate) fn touch_viewport_scope<R>(&mut self, viewport: (i32, i32, i32, i32), f: impl FnOnce(&mut Self) -> R) -> R {
         self.ensure_touches();
         let original = self.touches.take().unwrap();
         self.touches = Some(
-            Judge::replay_touches(self.viewport)
+            Judge::replay_touches(viewport)
                 .into_iter()
                 .filter(|touch| original.iter().any(|allowed| allowed.id == touch.id && allowed.phase == touch.phase))
                 .collect(),
         );
         let result = f(self);
-        self.touches = Some(original);
+        // Restore the incoming coordinate space, but keep consumed events
+        // consumed so another overlay cannot react to the same contact.
+        let remaining = self.touches.take().unwrap_or_default();
+        self.touches = Some(original.into_iter().filter(|touch| {
+            remaining.iter().any(|allowed| allowed.id == touch.id && allowed.phase == touch.phase)
+        }).collect());
         result
     }
 
@@ -1665,5 +1688,38 @@ mod resource_slider_tests {
         assert_eq!(value, 100.);
         slider.touch(&touch(TouchPhase::Moved, 0.95), 0., &mut value);
         assert_eq!(value, 95.);
+    }
+}
+
+#[cfg(test)]
+mod practice_time_button_tests {
+    use super::*;
+    fn button() -> RectButton {
+        RectButton { pts: Some([vec2(-0.6,0.3),vec2(-0.3,0.3),vec2(-0.3,0.4),vec2(-0.6,0.4)]), id: None }
+    }
+    fn contact(id: u64, phase: TouchPhase, x: f32) -> Touch {
+        Touch { id, phase, position: vec2(x,0.35), time: 0. }
+    }
+    #[test]
+    fn time_button_tracks_only_its_finger_and_consumes_the_click() {
+        let mut button = button();
+        assert_eq!(button.consume_touch(&contact(1,TouchPhase::Started,-0.45)), (true,false));
+        assert_eq!(button.consume_touch(&contact(2,TouchPhase::Ended,-0.45)), (false,false));
+        assert_eq!(button.consume_touch(&contact(2,TouchPhase::Cancelled,-0.45)), (false,false));
+        assert!(button.touching());
+        assert_eq!(button.consume_touch(&contact(1,TouchPhase::Moved,-0.4)), (true,false));
+        assert_eq!(button.consume_touch(&contact(1,TouchPhase::Ended,-0.4)), (true,true));
+        assert!(!button.touching());
+        assert_eq!(button.consume_touch(&contact(1,TouchPhase::Ended,-0.4)), (false,false));
+    }
+    #[test]
+    fn moving_outside_or_cancelling_does_not_open_time_input() {
+        for phase in [TouchPhase::Moved,TouchPhase::Cancelled] {
+            let mut button = button();
+            button.consume_touch(&contact(1,TouchPhase::Started,-0.45));
+            assert_eq!(button.consume_touch(&contact(1,phase,0.1)), (true,false));
+            assert!(!button.touching());
+            assert_eq!(button.consume_touch(&contact(1,TouchPhase::Ended,-0.45)), (false,false));
+        }
     }
 }

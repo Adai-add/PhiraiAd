@@ -425,6 +425,7 @@ impl BinaryData for JudgeLine {
     fn write_binary<W: Write>(&self, w: &mut BinaryWriter<W>) -> Result<()> {
         w.write(&self.object)?;
         match &self.kind {
+            JudgeLineKind::Noise => bail!("Recorder noise carriers require the original RPE chart"),
             JudgeLineKind::Normal => w.write_val(0_u8)?,
             JudgeLineKind::Texture(_, path) => {
                 w.write_val(1_u8)?;

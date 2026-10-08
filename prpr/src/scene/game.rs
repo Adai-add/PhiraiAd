@@ -1182,8 +1182,19 @@ impl GameScene {
         Ok(())
     }
 
+    fn exercise_time_button(ui: &mut Ui, button: &mut RectButton) -> bool {
+        let mut clicked = false;
+        ui.ensure_touches().retain(|touch| {
+            let (handled, pressed) = button.consume_touch(touch);
+            clicked |= pressed;
+            !handled
+        });
+        clicked
+    }
+
     fn overlay_ui(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
-        ui.abs_scope(|ui| self.overlay_ui_absolute(ui, tm))
+        let viewport = self.res.camera.viewport.unwrap_or(ui.viewport);
+        ui.abs_scope(|ui| ui.touch_viewport_scope(viewport, |ui| self.overlay_ui_absolute(ui, tm)))
     }
 
     fn overlay_ui_absolute(&mut self, ui: &mut Ui, tm: &mut TimeManager) -> Result<()> {
@@ -1231,7 +1242,7 @@ impl GameScene {
             );
             if res.config.interactive {
                 let mut clicked = None;
-                for touch in Judge::get_touches() {
+                for touch in ui.ensure_touches().clone() {
                     if touch.phase != TouchPhase::Started {
                         continue;
                     }
@@ -1280,11 +1291,9 @@ impl GameScene {
                 let previous_note_flow_lock = self.exercise_note_flow_locked;
                 let previous_judgement_percent = self.exercise_judgement_percent;
                 let previous_judgement_lock = self.exercise_judgement_locked;
-                // Practice controls are rendered in the chart camera/viewport.
-                // Judge::get_touches() (used by Ui) is already normalized against
-                // that same letterboxed viewport, so applying a screen/chart
-                // aspect ratio again would shift hit regions whenever the chart
-                // does not fill the display.
+                // overlay_ui remaps allowed raw touches into the chart viewport.
+                // Cached contacts may come from the full display; no inferred
+                // screen/chart aspect multiplier is needed.
                 let previous_pitch = self.res.config.practice_preserve_pitch;
                 ui.scope(|ui| {
                     ui.dx(-0.9);
@@ -1431,7 +1440,7 @@ impl GameScene {
                 ui.fill_circle(st, -eh, rad, BLUE);
                 if self.exercise_press.is_none() {
                     let r = ui.rect_to_global(Rect::new(st, -eh, 0., 0.).feather(rad));
-                    self.exercise_press = Judge::get_touches()
+                    self.exercise_press = ui.ensure_touches().clone()
                         .iter()
                         .find(|it| it.phase == TouchPhase::Started && r.contains(it.position))
                         .map(|it| (-1, it.id));
@@ -1440,7 +1449,7 @@ impl GameScene {
                 ui.fill_circle(en, eh, rad, RED);
                 if self.exercise_press.is_none() {
                     let r = ui.rect_to_global(Rect::new(en, eh, 0., 0.).feather(rad));
-                    self.exercise_press = Judge::get_touches()
+                    self.exercise_press = ui.ensure_touches().clone()
                         .iter()
                         .find(|it| it.phase == TouchPhase::Started && r.contains(it.position))
                         .map(|it| (1, it.id));
@@ -1449,14 +1458,14 @@ impl GameScene {
                 ui.fill_circle(cur, 0., rad, GREEN);
                 if self.exercise_press.is_none() {
                     let r = ui.rect_to_global(Rect::new(cur, 0., 0., 0.).feather(rad));
-                    self.exercise_press = Judge::get_touches()
+                    self.exercise_press = ui.ensure_touches().clone()
                         .iter()
                         .find(|it| it.phase == TouchPhase::Started && r.contains(it.position))
                         .map(|it| (0, it.id));
                 }
                 ui.text(fmt_time(t as f32)).pos(0., -0.23).anchor(0.5, 0.).size(0.8).draw();
                 if let Some((ctrl, id)) = &self.exercise_press {
-                    if let Some(touch) = Judge::get_touches().iter().rfind(|it| it.id == *id) {
+                    if let Some(touch) = ui.ensure_touches().clone().iter().rfind(|it| it.id == *id) {
                         let x = touch.position.x;
                         let p = (x + hw) as f64 / (hw * 2.) as f64 * (self.res.track_length - sp) + sp;
                         let p = if self.res.track_length - sp <= 3. || *ctrl == 0 {
@@ -1503,6 +1512,9 @@ impl GameScene {
                     .color(BLACK);
                 let re = tx.measure();
                 self.exercise_btns.0.set(tx.ui, re);
+                if Self::exercise_time_button(tx.ui, &mut self.exercise_btns.0) {
+                    request_input("exercise_start", InputBox::new().default_text(fmt_time(self.exercise_range.start as f32)));
+                }
                 tx.ui
                     .fill_rect(re.feather(0.01), Color::new(1., 1., 1., if self.exercise_btns.0.touching() { 0.5 } else { 1. }));
                 tx.draw();
@@ -1514,6 +1526,9 @@ impl GameScene {
                     .color(BLACK);
                 let re = tx.measure();
                 self.exercise_btns.1.set(tx.ui, re);
+                if Self::exercise_time_button(tx.ui, &mut self.exercise_btns.1) {
+                    request_input("exercise_end", InputBox::new().default_text(fmt_time(self.exercise_range.end as f32)));
+                }
                 tx.ui
                     .fill_rect(re.feather(0.01), Color::new(1., 1., 1., if self.exercise_btns.1.touching() { 0.5 } else { 1. }));
                 tx.draw();
@@ -1563,7 +1578,7 @@ impl GameScene {
             }
         }
         if self.res.config.touch_debug {
-            for touch in Judge::get_touches() {
+            for touch in Judge::replay_touches(self.res.camera.viewport.unwrap_or(ui.viewport)) {
                 ui.fill_circle(touch.position.x, touch.position.y, 0.04, Color { a: 0.4, ..RED });
             }
         }
@@ -2244,19 +2259,8 @@ impl Scene for GameScene {
         if self.mode == GameMode::TweakOffset {
             self.offset_analysis.touch(touch, tm.real_time() as f32);
         }
-        if self.mode == GameMode::Exercise && tm.paused() {
-            // SceneManager supplies gameplay touches in the current chart
-            // viewport coordinates. RectButton stores the practice time buttons
-            // in that same coordinate system, including letterboxed charts.
-            if self.exercise_btns.0.touch(touch) {
-                request_input("exercise_start", InputBox::new().default_text(fmt_time(self.exercise_range.start as f32)));
-                return Ok(true);
-            }
-            if self.exercise_btns.1.touch(touch) {
-                request_input("exercise_end", InputBox::new().default_text(fmt_time(self.exercise_range.end as f32)));
-                return Ok(true);
-            }
-        }
+        // Practice time buttons run alongside their drawing in overlay_ui,
+        // where contacts have been explicitly mapped to the chart viewport.
         Ok(false)
     }
 
@@ -2607,6 +2611,33 @@ impl Scene for GameScene {
 #[cfg(test)]
 mod exercise_note_flow_tests {
     use super::*;
+
+    #[test]
+    fn practice_controls_use_their_drawn_viewport_on_long_displays() {
+        // Include full-screen, wide phones, a 4:3 chart, and an offset canvas.
+        for (canvas, viewport) in [
+            ((0,0,1920,1080),(0,0,1920,1080)),
+            ((0,0,2400,1080),(240,0,1920,1080)),
+            ((0,0,2800,1260),(280,0,2240,1260)),
+            ((0,0,2560,1440),(320,0,1920,1440)),
+            ((40,30,2400,1080),(280,30,1920,1080)),
+            ((0,0,1080,1920),(0,656,1080,607)),
+        ] {
+            let height = (canvas.1 + canvas.3 + 60) as f32;
+            let camera = Camera2D { zoom: vec2(1.,-viewport.2 as f32/viewport.3 as f32), ..Default::default() };
+            for point in [vec2(-0.9,-0.48),vec2(-0.22,-0.49),vec2(0.3,-0.48),vec2(0.76,-0.15),vec2(0.,0.)] {
+                let clip = camera.matrix() * vec4(point.x,point.y,0.,1.);
+                let raw = vec2(viewport.0 as f32+(clip.x+1.)*viewport.2 as f32/2.,
+                    height-(viewport.1 as f32+(clip.y+1.)*viewport.3 as f32/2.));
+                let mapped = Judge::screen_touch_position(raw,viewport,height);
+                assert!((mapped-point).length() < 1e-5, "canvas={canvas:?}, viewport={viewport:?}, point={point:?}");
+                if canvas.2 != viewport.2 && point.x.abs() > 0.1 {
+                    let cached = Judge::screen_touch_position(raw,canvas,height);
+                    assert!((cached.x-point.x).abs() > 0.02); // reproduce the previous radial mismatch
+                }
+            }
+        }
+    }
 
     #[test]
     fn pause_replay_control_is_top_right_on_different_displays() {

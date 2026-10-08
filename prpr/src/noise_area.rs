@@ -1,7 +1,7 @@
-//! Phigros block-area (噪域) data and hit testing.
+//! Official block-area and Recorder carrier (噪域) data and hit testing.
 //!
-//! The chart field is intentionally kept separate from the global switches so
-//! charts without `blockAreaList` stay on the normal rendering path.
+//! Both formats share gameplay switches, touch latches and effect rendering;
+//! Recorder carriers add seekable lifecycle markers and RPE animation snapshots.
 use macroquad::prelude::Vec2;
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,8 @@ impl Default for NoiseAreaConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BlockArea {
+    #[serde(skip)]
+    pub recorder: Option<Box<recorder::RecorderArea>>,
     pub top_right_percentage: Point,
     pub bottom_left_percentage: Point,
     pub appear_time: f32,
@@ -83,6 +85,7 @@ pub struct BlockScaleEvent {
 
 pub mod audio;
 mod perf;
+pub mod recorder;
 pub mod render;
 
 fn ease_raw(n: i32, t: f32) -> f32 {
@@ -224,15 +227,37 @@ impl BlockArea {
         Ok(())
     }
     pub fn active(&self, t: f32) -> bool {
+        if let Some(r) = &self.recorder {
+            return r.state(t as f64) == 2;
+        }
         t >= self.enable_time && t < self.disable_time
     }
     pub fn visible(&self, t: f32) -> bool {
+        if let Some(r) = &self.recorder {
+            return (1..=3).contains(&r.state(t as f64));
+        }
         t >= self.appear_time && t < self.disappear_time
     }
     pub fn ready(&self, t: f32) -> bool {
+        if let Some(r) = &self.recorder {
+            return r.ready(t as f64);
+        }
         t >= self.enable_time - 0.5 && t < self.enable_time
     }
+    pub fn fade(&self, t: f32) -> f32 {
+        if let Some(r) = &self.recorder {
+            return r.fade(t as f64);
+        }
+        if !self.active(t) && !self.ready(t) && t < self.enable_time {
+            ((t - self.appear_time) / 0.5).clamp(0., 1.)
+        } else {
+            1.
+        }
+    }
     pub fn pose(&self, t: f32, aspect: f32) -> Pose {
+        if let Some(r) = &self.recorder {
+            return r.pose;
+        }
         let lo = world(self.bottom_left_percentage, aspect);
         let hi = world(self.top_right_percentage, aspect);
         let base = (lo + hi) * 0.5;
@@ -300,10 +325,28 @@ impl BlockArea {
         }
     }
 }
-fn blocked(areas: &[BlockArea], p: Vec2, t: f32, aspect: f32) -> bool {
+pub(crate) fn blocked(areas: &[BlockArea], p: Vec2, t: f32, aspect: f32) -> bool {
     let (mut a, mut b, mut c, mut d) = (false, false, false, false);
+    let (mut rn, mut rs, mut ran, mut ras) = (false, 0usize, false, 0usize);
     for area in areas.iter().filter(|a| a.active(t)) {
         let pose = area.pose(t, aspect);
+        if area.recorder.is_some() {
+            if pose.contains(p, false, area.is_subtract) {
+                if area.is_subtract {
+                    rs += 1
+                } else {
+                    rn = true
+                }
+            }
+            if pose.contains(p, true, area.is_subtract) {
+                if area.is_subtract {
+                    ras += 1
+                } else {
+                    ran = true
+                }
+            }
+            continue;
+        }
         if pose.contains(p, false, area.is_subtract) {
             if area.is_subtract {
                 b ^= true
@@ -319,7 +362,7 @@ fn blocked(areas: &[BlockArea], p: Vec2, t: f32, aspect: f32) -> bool {
             }
         }
     }
-    (a ^ b) && (c ^ d)
+    ((a ^ b) && (c ^ d)) || ((rn ^ (rs == 1)) && (ran ^ (ras == 1)))
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Hover {

@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer};
 use std::{any::Any, cell::RefCell, collections::HashMap, future::IntoFuture, io::Cursor, rc::Rc, str::FromStr, time::Duration};
 use tracing::debug;
 
-use super::{process_lines, L10N_LOCAL, RPE_TWEEN_MAP};
+use super::{process_lines_with_real_hints, L10N_LOCAL, RPE_TWEEN_MAP};
 use crate::{
     core::{
         Anim, AnimFloat, AnimVector, BezierTween, BpmList, Chart, ChartExtra, ChartSettings, ClampedTween, CtrlObject, GeneralIntTween, GifFrames,
@@ -167,6 +167,8 @@ struct RPENote {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RPEJudgeLine {
+    #[serde(default = "noise_anchor_default")]
+    anchor: [f32; 2],
     // TODO group
     // TODO bpmfactor
     #[serde(rename = "Name")]
@@ -294,14 +296,21 @@ fn speed_segment_tween(mode: SpeedEasingMode, start_speed: f32, end_speed: f32, 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RPEChart {
+    #[serde(default)]
+    block_area_list: Vec<crate::noise_area::BlockArea>,
     #[serde(rename = "META")]
     meta: RPEMetadata,
     #[serde(rename = "BPMList")]
     bpm_list: Vec<RPEBpmItem>,
     judge_line_list: Vec<RPEJudgeLine>,
+    #[serde(default)]
+    phiraiad_pure_config: Option<serde_json::Value>,
 }
 
 type BezierMap = HashMap<(u16, i16, i16), Rc<dyn TweenFunction>>;
+fn noise_anchor_default() -> [f32; 2] {
+    [0.5, 0.5]
+}
 
 fn parse_events<T: Tweenable, V: Clone + Into<T>>(
     r: &mut BpmList,
@@ -647,6 +656,7 @@ async fn parse_judge_line(
     hitsounds: &mut HitSoundMap,
     line_texture_map: &mut HashMap<String, SafeTexture>,
 ) -> Result<JudgeLine> {
+    let recorder = crate::noise_area::recorder::texture_kind(&rpe.texture).is_some();
     let event_layers: Vec<_> = rpe.event_layers.into_iter().flatten().collect();
     fn events_with_factor(
         r: &mut BpmList,
@@ -668,16 +678,22 @@ async fn parse_judge_line(
         res.map_value(|v| v * factor);
         Ok(res)
     }
-    let mut height = if use_rpe_170_speed {
+    let mut height = if recorder {
+        AnimFloat::fixed(0.)
+    } else if use_rpe_170_speed {
         parse_speed_events(r, &event_layers, bezier_map, max_time, speed_mode)?
     } else {
         parse_speed_events_legacy(r, &event_layers, max_time)?
     };
-    let mut notes = parse_notes(r, rpe.notes.unwrap_or_default(), fs, &mut height, hitsounds).await?;
+    let mut notes = parse_notes(r, if recorder { Vec::new() } else { rpe.notes.unwrap_or_default() }, fs, &mut height, hitsounds).await?;
     let cache = JudgeLineCache::new(&mut notes);
     Ok(JudgeLine {
         object: Object {
-            alpha: events_with_factor(r, &event_layers, |it| &it.alpha_events, 1. / 255., "alpha", bezier_map)?,
+            alpha: if recorder {
+                AnimFloat::fixed(0.)
+            } else {
+                events_with_factor(r, &event_layers, |it| &it.alpha_events, 1. / 255., "alpha", bezier_map)?
+            },
             rotation: events_with_factor(r, &event_layers, |it| &it.rotate_events, -1., "rotate", bezier_map)?,
             translation: AnimVector(
                 events_with_factor(r, &event_layers, |it| &it.move_x_events, 2. / RPE_WIDTH, "move X", bezier_map)?,
@@ -693,7 +709,7 @@ async fn parse_judge_line(
                     res.map_value(|v| v * factor);
                     Ok(res)
                 }
-                let factor = if rpe.texture == "line.png" { 1. } else { 2. / RPE_WIDTH };
+                let factor = if recorder || rpe.texture == "line.png" { 1. } else { 2. / RPE_WIDTH };
                 rpe.extended
                     .as_ref()
                     .map(|e| -> Result<_> {
@@ -736,7 +752,9 @@ async fn parse_judge_line(
             AnimFloat::default()
         },
         notes,
-        kind: if rpe.texture == "line.png" {
+        kind: if recorder {
+            JudgeLineKind::Noise
+        } else if rpe.texture == "line.png" {
             if let Some(events) = rpe.extended.as_ref().and_then(|e| e.paint_events.as_ref()) {
                 JudgeLineKind::Paint(
                     parse_events(r, events, Some(-1.), bezier_map).with_context(|| ptl!("paint-events-parse-failed"))?,
@@ -803,7 +821,8 @@ async fn parse_judge_line(
             JudgeLineKind::Texture(texture, rpe.texture.clone())
         },
         color: if let Some(events) = rpe.extended.as_ref().and_then(|e| e.color_events.as_ref()) {
-            parse_events(r, events, Some(WHITE), bezier_map).with_context(|| ptl!("color-events-parse-failed"))?
+            parse_events(r, events, Some(if recorder { Color::from_rgba(255, 84, 84, 255) } else { WHITE }), bezier_map)
+                .with_context(|| ptl!("color-events-parse-failed"))?
         } else {
             Anim::default()
         },
@@ -856,8 +875,14 @@ fn get_bezier_map(rpe: &RPEChart) -> BezierMap {
     map
 }
 
-pub async fn parse_rpe(source: &str, fs: &mut dyn FileSystem, extra: ChartExtra, use_rpe_170_speed: bool) -> Result<Chart> {
+pub async fn parse_rpe(source: &str, fs: &mut dyn FileSystem, mut extra: ChartExtra, use_rpe_170_speed: bool) -> Result<Chart> {
     let rpe: RPEChart = serde_json::from_str(source).with_context(|| ptl!("json-parse-failed"))?;
+    let real_only_hints = rpe
+        .phiraiad_pure_config
+        .as_ref()
+        .and_then(|v| v.get("realNotesOnlyHints"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let speed_mode = if rpe.meta.rpe_version >= 170 {
         SpeedEasingMode::Modern
     } else {
@@ -865,6 +890,10 @@ pub async fn parse_rpe(source: &str, fs: &mut dyn FileSystem, extra: ChartExtra,
     };
     let bezier_map = get_bezier_map(&rpe);
     let mut r = BpmList::new(rpe.bpm_list.into_iter().map(|it| (it.start_time.beats(), it.bpm)).collect());
+    for mut area in rpe.block_area_list {
+        area.normalize()?;
+        extra.block_areas.push(area);
+    }
     fn vec<T>(v: &Option<Vec<T>>) -> impl Iterator<Item = &T> {
         v.iter().flat_map(|it| it.iter())
     }
@@ -904,6 +933,62 @@ pub async fn parse_rpe(source: &str, fs: &mut dyn FileSystem, extra: ChartExtra,
     let mut lines = Vec::new();
     let mut line_texture_map = HashMap::new();
     for (id, rpe) in rpe.judge_line_list.into_iter().enumerate() {
+        if let Some(is_subtract) = crate::noise_area::recorder::texture_kind(&rpe.texture).filter(|_| !real_only_hints) {
+            use crate::noise_area::{
+                recorder::{Marker, RecorderArea},
+                BlockArea, Pose,
+            };
+            let mut markers = Vec::new();
+            for e in rpe.event_layers.iter().flatten().flat_map(|l| l.speed_events.iter().flatten()) {
+                let time = r.time(&e.start_time);
+                let state = if [1., 2., 3., 4.].contains(&e.start) {
+                    e.start as u8
+                } else {
+                    tracing::warn!(line = id, value = e.start, time, "Undefined Recorder noise state; treating as hidden");
+                    0
+                };
+                anyhow::ensure!(time.is_finite(), "噪域生命周期时间非法");
+                markers.push(Marker { time, state });
+            }
+            markers.sort_by(|a, b| a.time.total_cmp(&b.time));
+            // Later layers win simultaneous markers. Identical state markers
+            // do not restart the appearance fade or warning interval.
+            let mut steps: Vec<Marker> = Vec::new();
+            for marker in markers {
+                if steps.last().is_some_and(|m| m.time == marker.time) {
+                    steps.pop();
+                }
+                steps.push(marker);
+            }
+            steps.dedup_by_key(|m| m.state);
+            let markers = steps;
+            anyhow::ensure!(rpe.anchor.iter().all(|v| v.is_finite()), "噪域锚点非法");
+            let texture_size = if fs.exists(&rpe.texture).await? {
+                let bytes = fs.load_file(&rpe.texture).await?;
+                let (w, h) = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?.into_dimensions()?;
+                macroquad::prelude::vec2(w as f32, h as f32)
+            } else {
+                tracing::warn!(line = id, texture = rpe.texture, "Missing Recorder texture; using protocol default 900x900");
+                macroquad::prelude::vec2(900., 900.)
+            };
+            extra.block_areas.push(BlockArea {
+                is_subtract,
+                recorder: Some(Box::new(RecorderArea {
+                    line: id,
+                    z_order: rpe.z_order,
+                    anchor: macroquad::prelude::vec2(rpe.anchor[0], rpe.anchor[1]),
+                    texture_size,
+                    markers,
+                    pose: Pose {
+                        center: macroquad::prelude::Vec2::ZERO,
+                        size: macroquad::prelude::Vec2::ZERO,
+                        angle: 0.,
+                    },
+                    color: macroquad::prelude::Color::new(1., 84. / 255., 84. / 255., 1.),
+                })),
+                ..Default::default()
+            });
+        }
         let name = rpe.name.clone();
         lines.push(
             parse_judge_line(&mut r, rpe, max_time, speed_mode, fs, use_rpe_170_speed, &bezier_map, &mut hitsounds, &mut line_texture_map)
@@ -928,7 +1013,7 @@ pub async fn parse_rpe(source: &str, fs: &mut dyn FileSystem, extra: ChartExtra,
             ptl!(bail "found infinite recursive parent relations", "line" => line)
         }
     }
-    process_lines(&mut lines);
+    process_lines_with_real_hints(&mut lines, real_only_hints);
     Ok(Chart::new(rpe.meta.offset as f32 / 1000.0, lines, r, ChartSettings::default(), extra, hitsounds))
 }
 
@@ -947,4 +1032,61 @@ pub async fn lint(source: &str) -> Result<ParseWarnings> {
         has_new_speed_events,
         has_attach_ui,
     })
+}
+
+#[cfg(test)]
+mod recorder_tests {
+    use super::*;
+    use serde_json::json;
+    fn empty_fs() -> crate::fs::ZipFileSystem {
+        let bytes = zip::ZipWriter::new(Cursor::new(Vec::new())).finish().unwrap().into_inner();
+        crate::fs::ZipFileSystem::new(bytes).unwrap()
+    }
+    fn fixture() -> serde_json::Value {
+        let event = |beat, value| json!({"startTime":[beat,0,1],"endTime":[beat+1,0,1],"start":value,"end":99});
+        json!({"META":{"RPEVersion":170,"offset":0},"BPMList":[{"bpm":120,"startTime":[0,0,1]}],
+            "judgeLineList":[{"Name":"noise","Texture":"isSubtract0.png","father":-1,"isCover":1,"anchor":[0,0],
+                "eventLayers":[{"speedEvents":[event(0,10),event(2,1),event(3,1),event(4,2),event(6,4),event(8,2)]}],
+                "extended":{"scaleXEvents":[{"startTime":[0,0,1],"endTime":[20,0,1],"start":-1,"end":-1}],
+                    "scaleYEvents":[{"startTime":[0,0,1],"endTime":[20,0,1],"start":0.5,"end":0.5}],
+                    "colorEvents":[{"startTime":[0,0,1],"endTime":[20,0,1],"start":[255,0,255],"end":[255,0,255]}]}}],
+            "blockAreaList":[{"appearTime":0,"enableTime":0,"disableTime":5,"disappearTime":5,
+                "bottomLeftPercentage":{"x":0,"y":0},"topRightPercentage":{"x":1,"y":1}}]})
+    }
+    #[test]
+    fn both_formats_parse_and_carriers_reuse_rpe_animation() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut chart = parse_rpe(&fixture().to_string(), &mut empty_fs(), ChartExtra::default(), true)
+                .await
+                .unwrap();
+            assert_eq!(chart.extra.block_areas.len(), 2);
+            assert!(chart.extra.block_areas[0].recorder.is_none());
+            assert!(matches!(chart.lines[0].kind, JudgeLineKind::Noise));
+            assert!(chart.lines[0].notes.is_empty());
+            let line = &mut chart.lines[0];
+            line.object.set_time(2.);
+            line.color.set_time(2.);
+            let recorder = chart.extra.block_areas[1].recorder.as_mut().unwrap();
+            assert_eq!(recorder.state(0.), 0);
+            assert_eq!(recorder.state(1.2), 1);
+            assert!(!recorder.ready(1.49));
+            assert!(recorder.ready(1.5));
+            assert_eq!(recorder.state(2.1), 2);
+            assert_eq!(recorder.state(3.), 4);
+            assert_eq!(recorder.state(4.), 2);
+            assert_eq!(recorder.state(2.), 2);
+            assert_eq!(recorder.markers.len(), 5); // duplicate 1 does not reset appearance
+            recorder.refresh(line, crate::core::Matrix::identity(), 1.);
+            assert!((recorder.pose.size.x - 20. / 3.).abs() < 1e-5);
+            assert!((recorder.pose.size.y - 5.).abs() < 1e-5);
+            assert!((recorder.pose.center - macroquad::prelude::vec2(-10. / 3., 2.5)).length() < 1e-5);
+            assert_eq!(recorder.color, macroquad::prelude::MAGENTA);
+            let mut pure = fixture();
+            pure.as_object_mut().unwrap().remove("blockAreaList");
+            pure["phiraiadPureConfig"] = json!({"realNotesOnlyHints":true});
+            let pure = parse_rpe(&pure.to_string(), &mut empty_fs(), ChartExtra::default(), false).await.unwrap();
+            assert!(pure.extra.block_areas.is_empty());
+            assert!(matches!(pure.lines[0].kind, JudgeLineKind::Noise));
+        });
+    }
 }

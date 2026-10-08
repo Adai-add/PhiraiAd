@@ -74,6 +74,8 @@ impl GifFrames {
 
 #[derive(Default)]
 pub enum JudgeLineKind {
+    /// Retain RPE transforms and parent indices without drawing a carrier texture.
+    Noise,
     #[default]
     Normal,
     Texture(SafeTexture, String),
@@ -263,6 +265,7 @@ impl JudgeLine {
             }
             res.with_model(self.object.now_scale(Vector::default()), |res| {
                 res.apply_model(|res| match &self.kind {
+                    JudgeLineKind::Noise => {},
                     JudgeLineKind::Normal => {
                         let mut color = color.unwrap_or(res.judge_line_color);
                         color.a *= alpha.max(0.0);

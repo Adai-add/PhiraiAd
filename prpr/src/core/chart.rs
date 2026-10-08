@@ -16,7 +16,7 @@ use std::{cell::RefCell, collections::HashMap};
 pub struct ChartExtra {
     pub effects: Vec<Effect>,
     pub global_effects: Vec<Effect>,
-    /// Blocked touch regions exported by Phigros charts.
+    /// Official blocked touch regions and Recorder carrier snapshots.
     pub block_areas: Vec<crate::noise_area::BlockArea>,
     #[cfg(feature = "video")]
     pub videos: Vec<(super::Video, Option<super::VideoAttach>)>,
@@ -169,6 +169,24 @@ impl Chart {
         }
     }
 
+    /// Resolve carrier animations before judgement too: judgement precedes the
+    /// ordinary chart update, and practice may seek backwards at any time.
+    pub fn update_noise_areas(&mut self, res: &Resource) {
+        if !self.extra.block_areas.iter().any(|a| a.recorder.is_some()) {
+            return;
+        }
+        for line in &mut self.lines {
+            line.object.set_time(res.time);
+            line.color.set_time(res.time);
+        }
+        for area in &mut self.extra.block_areas {
+            if let Some(recorder) = &mut area.recorder {
+                let line = &self.lines[recorder.line];
+                recorder.refresh(line, line.now_transform(res, &self.lines), res.aspect_ratio);
+            }
+        }
+    }
+
     pub fn update(&mut self, res: &mut Resource) {
         for line in &mut self.lines {
             line.object.set_time(res.time);
@@ -176,11 +194,18 @@ impl Chart {
         self.frame_transform_key = None;
         let lines = &self.lines;
         self.frame_transforms.clear();
-        self.frame_transforms.extend(lines.iter().map(|line| (line.now_transform(res, lines), line.fetch_rot(lines))));
+        self.frame_transforms
+            .extend(lines.iter().map(|line| (line.now_transform(res, lines), line.fetch_rot(lines))));
         for (line, (tr, rot)) in self.lines.iter_mut().zip(&self.frame_transforms) {
             line.update(res, *tr, *rot);
         }
         self.frame_transform_key = Some((res.time, res.aspect_ratio));
+        // Reuse the transforms already resolved for ordinary line/note updates.
+        for area in &mut self.extra.block_areas {
+            if let Some(recorder) = &mut area.recorder {
+                recorder.refresh(&self.lines[recorder.line], self.frame_transforms[recorder.line].0, res.aspect_ratio);
+            }
+        }
         for effect in &mut self.extra.effects {
             effect.update(res);
         }

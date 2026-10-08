@@ -43,6 +43,7 @@ mod mp;
 mod page;
 mod play_report_export;
 mod popup;
+mod pure_config;
 mod rate;
 mod resource;
 mod scene;
