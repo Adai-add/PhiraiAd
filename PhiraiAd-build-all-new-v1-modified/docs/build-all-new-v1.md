@@ -55,7 +55,7 @@
 | Windows x64 | PhiraiAd-windows_x64-new.zip |
 | Linux x64 | PhiraiAd-linux-new.tar.gz |
 
-Android 沿用已有打包程序，检查架构、标记、图标、字体、版本、签名和 ZIP；versionCode 取最低配置值、底包+1、已有同名 APK+1 三者最大值，默认最低 11000。
+Android 沿用已有打包程序，检查架构、标记、图标、字体、版本、签名和 ZIP；versionCode 取最低配置值、底包+1、已有同名 APK+1 三者最大值，默认最低 16000。
 Windows 沿用已成功的独立脚本，程序和 assets 一起打包。
 Linux 包含顶层 `PhiraiAd-linux-new` 目录，内有 `PhiraiAd` 可执行文件和 assets；保留执行权限，并检查本机 ldd。真实 Linux 平台兼容性仍由使用的 glibc/系统依赖决定。
 

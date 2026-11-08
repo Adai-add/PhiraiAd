@@ -2344,24 +2344,7 @@ impl Judge {
                 }
                 Judgement::Bad => {
                     if !matches!(note.kind, NoteKind::Hold { .. }) {
-                        bad_notes.push(BadNote {
-                            time: t,
-                            kind: note.kind.clone(),
-                            matrix: {
-                                let mut mat = line_tr;
-                                if !note.above {
-                                    mat.append_nonuniform_scaling_mut(&Vector::new(1., -1.));
-                                }
-                                let incline_sin = line.incline.now_opt().map(|it| it.to_radians().sin()).unwrap_or_default();
-                                mat *= note.now_transform(
-                                    res,
-                                    &line.ctrl_obj.borrow_mut(),
-                                    ((note.height - line.height.now() as f64) / res.aspect_ratio as f64 * note.speed) as f32,
-                                    incline_sin,
-                                );
-                                mat
-                            },
-                        });
+                        bad_notes.push(BadNote::from_note(note, line, line_tr, res));
                     }
                     false
                 }

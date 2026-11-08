@@ -1,7 +1,7 @@
-//! Official block-area and Recorder carrier (噪域) data and hit testing.
+//! Official, Recorder carrier, and RPE-Next native (噪域) data and hit testing.
 //!
-//! Both formats share gameplay switches, touch latches and effect rendering;
-//! Recorder carriers add seekable lifecycle markers and RPE animation snapshots.
+//! All formats share gameplay switches and touch latches. Recorder carriers
+//! reuse RPE lines; Next areas have independent native event tracks and layers.
 use macroquad::prelude::Vec2;
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,8 @@ impl Default for NoiseAreaConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct BlockArea {
+    #[serde(skip)]
+    pub next: Option<Box<next::NextArea>>,
     #[serde(skip)]
     pub recorder: Option<Box<recorder::RecorderArea>>,
     pub top_right_percentage: Point,
@@ -84,9 +86,11 @@ pub struct BlockScaleEvent {
 }
 
 pub mod audio;
+pub mod next;
 mod perf;
 pub mod recorder;
 pub mod render;
+pub mod skin;
 
 fn ease_raw(n: i32, t: f32) -> f32 {
     let t = t.clamp(0., 1.);
@@ -227,24 +231,36 @@ impl BlockArea {
         Ok(())
     }
     pub fn active(&self, t: f32) -> bool {
+        if let Some(n) = &self.next {
+            return n.phase(t as f64).0 == next::State::Active;
+        }
         if let Some(r) = &self.recorder {
             return r.state(t as f64) == 2;
         }
         t >= self.enable_time && t < self.disable_time
     }
     pub fn visible(&self, t: f32) -> bool {
+        if let Some(n) = &self.next {
+            return !matches!(n.phase(t as f64).0, next::State::HiddenBefore | next::State::HiddenAfter);
+        }
         if let Some(r) = &self.recorder {
             return (1..=3).contains(&r.state(t as f64));
         }
         t >= self.appear_time && t < self.disappear_time
     }
     pub fn ready(&self, t: f32) -> bool {
+        if let Some(n) = &self.next {
+            return n.phase(t as f64).0 == next::State::Ready;
+        }
         if let Some(r) = &self.recorder {
             return r.ready(t as f64);
         }
         t >= self.enable_time - 0.5 && t < self.enable_time
     }
     pub fn fade(&self, t: f32) -> f32 {
+        if self.next.is_some() {
+            return 1.;
+        }
         if let Some(r) = &self.recorder {
             return r.fade(t as f64);
         }
@@ -255,6 +271,9 @@ impl BlockArea {
         }
     }
     pub fn pose(&self, t: f32, aspect: f32) -> Pose {
+        if let Some(n) = &self.next {
+            return n.sample(t as f64, aspect).pose;
+        }
         if let Some(r) = &self.recorder {
             return r.pose;
         }
@@ -328,8 +347,18 @@ impl BlockArea {
 pub(crate) fn blocked(areas: &[BlockArea], p: Vec2, t: f32, aspect: f32) -> bool {
     let (mut a, mut b, mut c, mut d) = (false, false, false, false);
     let (mut rn, mut rs, mut ran, mut ras) = (false, 0usize, false, 0usize);
+    let mut next_layers = std::collections::HashMap::<usize, (bool, usize)>::new();
     for area in areas.iter().filter(|a| a.active(t)) {
         let pose = area.pose(t, aspect);
+        if let Some(n) = &area.next {
+            // Layers have independent masks. Native Next uses exactly-one
+            // inversion; a third overlapping inverse must not restore the hole.
+            let entry = next_layers.entry(n.layer).or_default();
+            if pose.contains(p, false, area.is_subtract) {
+                if area.is_subtract { entry.1 += 1; } else { entry.0 = true; }
+            }
+            continue;
+        }
         if area.recorder.is_some() {
             if pose.contains(p, false, area.is_subtract) {
                 if area.is_subtract {
@@ -362,7 +391,7 @@ pub(crate) fn blocked(areas: &[BlockArea], p: Vec2, t: f32, aspect: f32) -> bool
             }
         }
     }
-    ((a ^ b) && (c ^ d)) || ((rn ^ (rs == 1)) && (ran ^ (ras == 1)))
+    ((a ^ b) && (c ^ d)) || ((rn ^ (rs == 1)) && (ran ^ (ras == 1))) || next_layers.values().any(|(normal, inverses)| *normal ^ (*inverses == 1))
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Hover {

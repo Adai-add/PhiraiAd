@@ -14,11 +14,12 @@ PhiraiAd 在原版 Phira 的基础上增加或修改了多项练习、判定和�
 - 按键转换
 - AI 定数预测
 - 自定义 RKS 计算
+- 谱面库准确率下方显示 [RKS 提升提示](docs/rks-gain-hints.md)
 - 查看、保存B30谱面
 - Hold 显示与打击特效改进
 - 实时判定条、Perfect/Good/Bad/Miss记录
 - 课题模式
-- 噪域（官谱和“不会特效の点缀星空”的噪域格式）
+- 噪域（官谱、“不会特效の点缀星空”和 [RPE-Next 原生格式](docs/rpe-next-noise.md)）
 - 噪域显示优化（精确边缘、去除扭曲特效、低性能模式）
 - 正解音
 - 自定义判定区间、连击分数、打击特效颜色
@@ -30,7 +31,7 @@ PhiraiAd 在原版 Phira 的基础上增加或修改了多项练习、判定和�
 
 ## 适配版本
 
-当前v1.5.1版本适配安卓、windows、ios (ios的ipa文件需要自行签名按照，不计划上AppleStore)。
+当前 v1.6.0 版本适配安卓、Windows、iOS（iOS 的 IPA 文件需要自行签名安装，不计划上架 App Store）。
 
 ## 下载
 

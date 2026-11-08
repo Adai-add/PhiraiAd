@@ -20,6 +20,7 @@ if [[ ! -f assets/background.jpg || ! -f assets/res/bgm ]]; then
     python3 scripts/prepare_ios_unsigned.py assets "$work_dir/assets.apk"
 fi
 python3 scripts/prepare_ios_unsigned.py plist "$work_dir/Info.plist"
+release_version=$(python3 scripts/prepare_ios_unsigned.py version)
 
 # Build with the lockfile before the project's Cargo build phase.
 cargo build --locked -p phira-main --bin phira-main --release --target aarch64-apple-ios
@@ -31,7 +32,7 @@ xcodebuild -project phira.xcodeproj -scheme phira \
     DEVELOPMENT_TEAM='' PROVISIONING_PROFILE_SPECIFIER='' \
     INFOPLIST_FILE="$work_dir/Info.plist" \
     PRODUCT_BUNDLE_IDENTIFIER=com.adaiadd.phiraiad \
-    MARKETING_VERSION=1.1.0 CURRENT_PROJECT_VERSION=110 \
+    MARKETING_VERSION="$release_version" CURRENT_PROJECT_VERSION=16000 \
     INFOPLIST_KEY_CFBundleDisplayName=PhiraiAd \
     ENABLE_USER_SCRIPT_SANDBOXING=NO \
     2>&1 | tee dist/ios-xcodebuild.log
@@ -43,7 +44,7 @@ xcrun lipo "$app_dir/phira-main" -verify_arch arm64
 xcrun vtool -show-build "$app_dir/phira-main"
 mkdir -p "$work_dir/package/Payload"
 ditto "$app_dir" "$work_dir/package/Payload/PhiraiAd.app"
-ipa="$PWD/dist/PhiraiAd-v1.1.0-ios-unsigned.ipa"
+ipa="$PWD/dist/PhiraiAd-v$release_version-ios-unsigned.ipa"
 ditto -c -k --keepParent "$work_dir/package/Payload" "$work_dir/output.ipa"
 unzip -t "$work_dir/output.ipa"
 mv -f "$work_dir/output.ipa" "$ipa"

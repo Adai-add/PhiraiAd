@@ -400,14 +400,15 @@ def verify_native_build_markers(lib: bytes):
 
 
 def main():
+    release = json.loads((Path(__file__).resolve().parents[1] / "build_all_new.config.json").read_text(encoding="utf-8-sig"))
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("base-apk", "native-lib", "cxx-lib", "build-tools", "keystore", "out"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--key-alias", required=True)
     parser.add_argument("--ks-pass-env", default="PHIRA_KS_PASS")
     parser.add_argument("--key-pass-env", default="PHIRA_KEY_PASS")
-    parser.add_argument("--version-name", default="0.8.2-replica23.0-bugfix1")
-    parser.add_argument("--version-code", type=int, default=10033)
+    parser.add_argument("--version-name", default=release["version"])
+    parser.add_argument("--version-code", type=int, default=release["minimumVersionCode"])
     parser.add_argument("--app-label", default=DEFAULT_APP_LABEL)
     icon_group = parser.add_mutually_exclusive_group()
     icon_group.add_argument("--icon", type=Path,

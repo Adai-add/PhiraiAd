@@ -138,3 +138,55 @@ fn ai_source_is_selectable_persists_and_does_not_invent_pending_values(){
  assert_eq!(restored.resolved["local/a"].difficulty,None);
  click(&mut p,"跟随文件");assert_eq!(p.resolved["local/a"].difficulty,Some(16.3));
 }
+
+#[test]
+fn gain_hints_refresh_after_rule_selection_and_accuracy_edits() {
+    use custom_rks::RksGainHint::{NoGain, Phi, Ready, TargetAccuracy};
+    let (_root, mut panel, state) = setup();
+    assert_eq!(panel.improvement_hints["local/a"], Ready);
+    assert_eq!(panel.improvement_hints["local/b"], Ready);
+    let previous = panel.improvement_hints.clone();
+    panel.action(editor::RksAction::Toggle("local/a".into())).unwrap();
+    assert_eq!(panel.improvement_hints["local/a"], NoGain);
+    assert_eq!(previous["local/a"], Ready);
+    panel.action(editor::RksAction::Toggle("local/a".into())).unwrap();
+    click(&mut panel, "RKS:");
+    click(&mut panel, "计算规则");
+    click(&mut panel, "最佳成绩数量");
+    input(&mut panel, "0").unwrap();
+    assert_eq!(panel.improvement_hints["local/a"], TargetAccuracy(10000));
+    assert_eq!(panel.improvement_hints["local/b"], TargetAccuracy(10000));
+    click(&mut panel, "本地谱面");
+    panel.action(editor::RksAction::Edit("local/a".into())).unwrap();
+    let buttons = render(&mut panel).buttons;
+    let (_, rect) = buttons.iter().rev().find(|(label, _)| label == "自定义").unwrap();
+    let position = Vec2 {
+        x: rect.x + rect.w / 2.,
+        y: rect.y + rect.h / 2.,
+    };
+    panel
+        .touch(
+            &Touch {
+                position,
+                phase: Phase::Started,
+            },
+            1.,
+        )
+        .unwrap();
+    panel
+        .touch(
+            &Touch {
+                position,
+                phase: Phase::Ended,
+            },
+            1.01,
+        )
+        .unwrap();
+    click(&mut panel, "准确率：");
+    input(&mut panel, "100").unwrap();
+    assert_eq!(panel.improvement_hints["local/a"], Phi);
+    let mut restored = editor::RksPanel::new().unwrap();
+    restored.refresh(&state);
+    assert_eq!(restored.improvement_hints["local/a"], Phi);
+    assert_eq!(restored.improvement_hints["local/b"], TargetAccuracy(10000));
+}

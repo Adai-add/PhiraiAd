@@ -5,7 +5,7 @@ param(
     [switch]$CheckOnly,
     [string]$BaseApk = '',
     [string]$VcpkgRoot = '',
-    [string]$Version = '1.1.0'
+    [string]$Version = ''
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -50,6 +50,12 @@ function Fill-MissingAssets([string]$Apk) {
 }
 
 try {
+    # Release branding differs from the upstream Cargo package version. Use the
+    # same config as the multi-platform builder when no override was supplied.
+    if (-not $Version) {
+        $Config = Get-Content -LiteralPath (Join-Path $Root 'build_all_new.config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $Version = [string]$Config.version
+    }
     if ($env:OS -ne 'Windows_NT') { throw 'Run this script on Windows, not inside WSL.' }
     if ($Version -notmatch '^\d+\.\d+\.\d+(?:[-.][A-Za-z0-9.-]+)?$') { throw 'Invalid release version.' }
     Set-Location -LiteralPath $Root

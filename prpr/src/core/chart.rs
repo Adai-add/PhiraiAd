@@ -18,6 +18,7 @@ pub struct ChartExtra {
     pub global_effects: Vec<Effect>,
     /// Official blocked touch regions and Recorder carrier snapshots.
     pub block_areas: Vec<crate::noise_area::BlockArea>,
+    pub noise_skins: Vec<crate::noise_area::skin::Definition>,
     #[cfg(feature = "video")]
     pub videos: Vec<(super::Video, Option<super::VideoAttach>)>,
 }

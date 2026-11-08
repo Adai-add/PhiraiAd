@@ -371,11 +371,10 @@ impl GameScene {
 
         res.has_noise_area = res.config.noise_area.enabled && !chart.extra.block_areas.is_empty();
         let noise_renderer = if res.has_noise_area {
-            Some(
-                crate::noise_area::render::NoiseRenderer::new(res.config.noise_area.low_performance)
-                    .await
-                    .context("Failed to initialize noise-area renderer")?,
-            )
+            let mut renderer = crate::noise_area::render::NoiseRenderer::new(res.config.noise_area.low_performance)
+                .await.context("Failed to initialize noise-area renderer")?;
+            renderer.configure_skins(&chart.extra.noise_skins, res.config.noise_area.low_performance).await?;
+            Some(renderer)
         } else {
             None
         };
@@ -1018,7 +1017,9 @@ impl GameScene {
         if res.config.interactive
             && !tm.paused()
             && self.pause_rewind.is_none()
-            && Judge::get_touches().iter().any(|touch| {
+            // Raw pause contacts belong to the display's chart viewport, not
+            // whichever offscreen pass last changed the renderer's viewport.
+            && Judge::replay_touches(res.camera.viewport.unwrap_or(ui.viewport)).iter().any(|touch| {
                 touch.phase == TouchPhase::Started && {
                     let p = touch.position;
                     let p = Point::new(p.x, p.y);
@@ -2296,9 +2297,10 @@ impl Scene for GameScene {
                 .needs_expanded_view(self.res.camera.viewport.map_or(ui.viewport.2, |vp| vp.2) as f32, self.res.aspect_ratio);
         let res = &mut self.res;
         let asp = ui.viewport.2 as f32 / ui.viewport.3 as f32;
-        if res.update_size(ui.viewport) || self.mode == GameMode::View {
-            set_camera(&res.camera);
-        }
+        res.update_size(ui.viewport);
+        // Establish the chart projection every frame. Callers and post-effects
+        // may have used a different camera since the previous frame.
+        set_camera(&res.camera);
 
         let msaa = res.config.sample_count > 1;
 
@@ -2361,7 +2363,8 @@ impl Scene for GameScene {
                 .or_else(|| res.camera.render_pass()),
         );
 
-        self.bad_notes.retain(|dummy| dummy.render(res));
+        self.bad_notes.retain(|dummy| dummy.is_alive(res.time));
+        BadNote::render_all(&self.bad_notes, res);
         let t = tm.real_time();
         let dt = (t - std::mem::replace(&mut self.last_update_time, t)) as f32;
         if res.config.particle {
@@ -2390,9 +2393,7 @@ impl Scene for GameScene {
                     render_target: Some(res.chart_target.as_ref().unwrap().output()),
                     ..res.camera
                 });
-                for note in bad_notes {
-                    note.render(res);
-                }
+                BadNote::render_all(bad_notes, res);
                 if res.config.particle {
                     res.emitter.draw_snapshot();
                 }
@@ -2454,8 +2455,18 @@ impl Scene for GameScene {
         }
         let rotating_canvas = self.res.rotate_chart;
         if !rotating_canvas {
-            self.ui(ui, tm)?;
-            self.overlay_ui(ui, tm)?;
+            push_camera_state();
+            set_camera(&Camera2D {
+                render_target: self.res.chart_target.as_ref().map(|target| target.output()).or(self.res.camera.render_target),
+                viewport: chart_target_vp,
+                ..self.res.camera
+            });
+            ui.abs_scope(|ui| -> Result<()> {
+                self.ui(ui, tm)?;
+                self.overlay_ui(ui, tm)
+            })?;
+            pop_camera_state();
+            self.gl.quad_gl.viewport(chart_target_vp);
         }
 
         if self.mode == GameMode::TweakOffset {

@@ -43,13 +43,16 @@ jobs:
       - name: Build unsigned IPA
         shell: bash
         run: bash scripts/build_ios_unsigned.sh
+      - name: Read release version
+        id: release
+        run: echo "version=$(python3 scripts/prepare_ios_unsigned.py version)" >> "$GITHUB_OUTPUT"
       - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
-          name: PhiraiAd-v1.1.0-ios-unsigned
+          name: PhiraiAd-v${{ steps.release.outputs.version }}-ios-unsigned
           path: |
-            dist/PhiraiAd-v1.1.0-ios-unsigned.ipa
-            dist/PhiraiAd-v1.1.0-ios-unsigned.ipa.sha256
+            dist/PhiraiAd-v${{ steps.release.outputs.version }}-ios-unsigned.ipa
+            dist/PhiraiAd-v${{ steps.release.outputs.version }}-ios-unsigned.ipa.sha256
           if-no-files-found: error
           retention-days: 30
       - name: Upload build log

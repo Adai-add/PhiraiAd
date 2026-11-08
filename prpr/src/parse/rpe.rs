@@ -297,7 +297,9 @@ fn speed_segment_tween(mode: SpeedEasingMode, start_speed: f32, end_speed: f32, 
 #[serde(rename_all = "camelCase")]
 struct RPEChart {
     #[serde(default)]
-    block_area_list: Vec<crate::noise_area::BlockArea>,
+    block_area_list: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    noise_area_layers: Option<serde_json::Value>,
     #[serde(rename = "META")]
     meta: RPEMetadata,
     #[serde(rename = "BPMList")]
@@ -889,10 +891,34 @@ pub async fn parse_rpe(source: &str, fs: &mut dyn FileSystem, mut extra: ChartEx
         SpeedEasingMode::Legacy
     };
     let bezier_map = get_bezier_map(&rpe);
+    let tempo = crate::noise_area::next::Tempo::new(rpe.bpm_list.iter().map(|it| (it.start_time.beats(), it.bpm)))?;
+    let layers = crate::noise_area::next::parse_layers(rpe.noise_area_layers.as_ref())?;
+    if let Some(layer_settings) = rpe.noise_area_layers.as_ref().and_then(serde_json::Value::as_array) {
+        for (index, settings) in layer_settings.iter().enumerate() {
+            if settings.get("skin").and_then(serde_json::Value::as_str).is_some_and(|s| !s.is_empty()) {
+                extra.noise_skins.push(
+                    crate::noise_area::skin::Definition::load(index, settings, fs)
+                        .await
+                        .with_context(|| format!("noiseAreaLayers[{index}]"))?,
+                );
+            }
+        }
+    }
     let mut r = BpmList::new(rpe.bpm_list.into_iter().map(|it| (it.start_time.beats(), it.bpm)).collect());
-    for mut area in rpe.block_area_list {
-        area.normalize()?;
-        extra.block_areas.push(area);
+    let mut next_areas = Vec::new();
+    for (index, value) in rpe.block_area_list.unwrap_or_default().into_iter().enumerate() {
+        if crate::noise_area::next::is_native(&value) {
+            let area = crate::noise_area::next::NextArea::parse(value, &tempo, &layers).with_context(|| format!("blockAreaList[{index}]"))?;
+            next_areas.push(crate::noise_area::BlockArea {
+                is_subtract: area.invert,
+                next: Some(Box::new(area)),
+                ..Default::default()
+            });
+        } else {
+            let mut area: crate::noise_area::BlockArea = serde_json::from_value(value).with_context(|| format!("blockAreaList[{index}]"))?;
+            area.normalize()?;
+            extra.block_areas.push(area);
+        }
     }
     fn vec<T>(v: &Option<Vec<T>>) -> impl Iterator<Item = &T> {
         v.iter().flat_map(|it| it.iter())
@@ -1013,6 +1039,9 @@ pub async fn parse_rpe(source: &str, fs: &mut dyn FileSystem, mut extra: ChartEx
             ptl!(bail "found infinite recursive parent relations", "line" => line)
         }
     }
+    // Keep native Next areas together after the older protocols. Rendering
+    // preserves the original native order and composes each layer independently.
+    extra.block_areas.extend(next_areas);
     process_lines_with_real_hints(&mut lines, real_only_hints);
     Ok(Chart::new(rpe.meta.offset as f32 / 1000.0, lines, r, ChartSettings::default(), extra, hitsounds))
 }
@@ -1052,6 +1081,32 @@ mod recorder_tests {
                     "colorEvents":[{"startTime":[0,0,1],"endTime":[20,0,1],"start":[255,0,255],"end":[255,0,255]}]}}],
             "blockAreaList":[{"appearTime":0,"enableTime":0,"disableTime":5,"disappearTime":5,
                 "bottomLeftPercentage":{"x":0,"y":0},"topRightPercentage":{"x":1,"y":1}}]})
+    }
+    #[test]
+    fn next_and_both_older_noise_formats_import_together() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut source = fixture();
+            source["META"]["RPEVersion"] = json!(250);
+            source["noiseAreaLayers"] = json!([{"id":"foreground","name":"Front"}]);
+            source["blockAreaList"].as_array_mut().unwrap().push(json!({
+                "bottomLeft":{"x":-100,"y":-80},"topRight":{"x":100,"y":80},
+                "appearTime":[0,0,1],"disappearTime":[12,0,1],"layerId":"foreground",
+                "activeIntervals":[{"startTime":[2,0,1],"endTime":[4,0,1],"readyFlash":0.75}]
+            }));
+            for speed_mode in [false, true] {
+                let chart = parse_rpe(&source.to_string(), &mut empty_fs(), ChartExtra::default(), speed_mode)
+                    .await
+                    .unwrap();
+                assert_eq!(chart.extra.block_areas.len(), 3);
+                assert!(chart.extra.block_areas[0].next.is_none());
+                assert!(chart.extra.block_areas[1].recorder.is_some());
+                let next = chart.extra.block_areas[2].next.as_ref().unwrap();
+                assert_eq!(next.phase(0.25).0, crate::noise_area::next::State::Ready);
+                assert_eq!(next.phase(1.).0, crate::noise_area::next::State::Active);
+            }
+            source["blockAreaList"] = serde_json::Value::Null;
+            assert!(parse_rpe(&source.to_string(), &mut empty_fs(), ChartExtra::default(), true).await.is_ok());
+        });
     }
     #[test]
     fn both_formats_parse_and_carriers_reuse_rpe_animation() {

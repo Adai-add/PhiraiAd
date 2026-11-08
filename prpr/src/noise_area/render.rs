@@ -11,6 +11,8 @@ use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
 };
+#[path = "render/skin.rs"]
+mod skin_bindings;
 /// Project noise geometry with the exact camera used for the chart. UVs are
 /// local to the full render target, including its letterboxed chart viewport.
 fn block_screen_uv(p: Vec2, aspect: f32, flip_x: bool, projection: Mat4, vp: (i32, i32, i32, i32), size: Vec2) -> Vec2 {
@@ -300,6 +302,9 @@ struct Program {
 }
 impl Program {
     fn new(vert: &str, frag: &str, blend: Option<BlendState>) -> Result<Self> {
+        Self::with_color_write(vert, frag, blend, (true, true, true, true))
+    }
+    fn with_color_write(vert: &str, frag: &str, blend: Option<BlendState>, color_write: (bool, bool, bool, bool)) -> Result<Self> {
         let (vert, frag) = canvas_shader(vert, frag);
         let (vert, frag) = (vert.as_str(), frag.as_str());
         let regex = regex::Regex::new(r"uniform\s+(?:(?:highp|mediump|lowp)\s+)?(float|int|vec2|vec3|vec4|sampler2D)\s+(\w+)\s*;")?;
@@ -336,6 +341,7 @@ impl Program {
                 textures: textures.iter().cloned().collect(),
                 pipeline_params: PipelineParams {
                     color_blend: blend,
+                    color_write,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -505,6 +511,7 @@ pub struct NoiseRenderer {
     overlay_output: Option<RenderTarget>,
     basic_profiler: Option<Profiler>,
     view_profiler: Option<Profiler>,
+    skin_bindings: Vec<skin_bindings::Bindings>,
 }
 impl NoiseRenderer {
     pub async fn new(low: bool) -> Result<Self> {
@@ -514,7 +521,18 @@ impl NoiseRenderer {
             overlay_output: None,
             basic_profiler: if low { Some(Profiler::new()) } else { None },
             view_profiler: None,
+            skin_bindings: Vec::new(),
         })
+    }
+    pub async fn configure_skins(&mut self, definitions: &[crate::noise_area::skin::Definition], low: bool) -> Result<()> {
+        if !definitions.is_empty() && self.effects.is_none() {
+            self.effects = Some(EffectRenderer::new().await?);
+        }
+        self.skin_bindings = definitions
+            .iter()
+            .map(|definition| skin_bindings::Bindings::new(definition, low))
+            .collect::<Result<_>>()?;
+        Ok(())
     }
     pub fn begin_composite(&mut self, low: bool, precise: bool, width: u32, height: u32) -> Token {
         let profiler = self.view_profiler.get_or_insert_with(Profiler::new);
@@ -588,7 +606,7 @@ impl NoiseRenderer {
         // Ready/disabled-only passes never enter the scene-color shader branch.
         // Keep the native chart capture for every active region and lingering
         // touch hover, including remove-distortion mode (it still reads color).
-        let needs_scene = !res.config.noise_area.low_performance
+        let needs_scene = !self.skin_bindings.is_empty() || !res.config.noise_area.low_performance
             && (areas.iter().any(|area| area.visible(res.time as f32) && area.active(res.time as f32))
                 || state.hovers.iter().any(|hover| hover.scale > 0.));
         if needs_scene {
@@ -646,6 +664,43 @@ impl NoiseRenderer {
         full_vp: (i32, i32, i32, i32),
         projection: Mat4,
     ) -> Result<()> {
+        if self.skin_bindings.is_empty() {
+            return self.render_legacy_native(res, areas, state, full_vp, projection);
+        }
+        let defaults: Vec<_> = areas
+            .iter()
+            .filter(|area| {
+                area.next
+                    .as_ref()
+                    .is_none_or(|next| !self.skin_bindings.iter().any(|skin| skin.layer == next.layer))
+            })
+            .cloned()
+            .collect();
+        if !defaults.is_empty() {
+            self.render_legacy_native(res, &defaults, state, full_vp, projection)?;
+        }
+        for bindings in &mut self.skin_bindings {
+            let layer: Vec<_> = areas
+                .iter()
+                .filter(|area| area.next.as_ref().is_some_and(|next| next.layer == bindings.layer))
+                .cloned()
+                .collect();
+            self.effects
+                .as_mut()
+                .unwrap()
+                .skin_passes(bindings, res, &layer, state, full_vp, projection)?;
+        }
+        Ok(())
+    }
+
+    fn render_legacy_native(
+        &mut self,
+        res: &mut Resource,
+        areas: &[BlockArea],
+        state: &NoiseAreaState,
+        full_vp: (i32, i32, i32, i32),
+        projection: Mat4,
+    ) -> Result<()> {
         if !res.config.noise_area.enabled {
             return Ok(());
         }
@@ -670,7 +725,7 @@ impl NoiseRenderer {
         let t = res.time as f32;
         let mut pieces = Vec::new();
         let mut blocking_shape = Vec::new();
-        if areas.iter().any(|a| a.recorder.is_some()) {
+        if areas.iter().any(|a| a.recorder.is_some()) || areas.iter().any(|a| a.next.is_some()) && areas.iter().any(|a| a.is_subtract) {
             let (composed, boundaries) = composed_pieces(areas, t, res.aspect_ratio, |p| EffectRenderer::screen_uv(p, res, vp, w, h, projection));
             for piece in composed {
                 if piece.phase == 0 {
@@ -706,7 +761,7 @@ impl NoiseRenderer {
                     1.
                 };
                 if phase == 0 {
-                    let adjusted = adjusted_pose(pose, area.is_subtract);
+                    let adjusted = if area.next.is_some() { pose } else { adjusted_pose(pose, area.is_subtract) };
                     let points = adjusted.corners().map(|p| EffectRenderer::screen_uv(p, res, vp, w, h, projection));
                     if points.iter().all(|p| p.is_finite()) {
                         if area.is_subtract {
@@ -990,6 +1045,7 @@ fn mask_polygons(normals: &[[Vec2; 4]], subtracts: &[[Vec2; 4]], screen: &[Vec2;
     xor.extend(difference(parity, &union));
     xor
 }
+
 /// Split with the existing convex clipping helpers, then classify each cell.
 /// This keeps Recorder's "exactly one inverse" rule separate from the official
 /// parity rule. Either format can contribute a blocked cell in mixed charts.
@@ -1005,6 +1061,8 @@ fn composed_pieces(areas: &[BlockArea], t: f32, aspect: f32, project: impl Fn(Ve
         polygon: [Vec2; 4],
         adjusted: [Vec2; 4],
         phase: usize,
+        group: usize,
+        native: bool,
     }
     let regions: Vec<_> = areas
         .iter()
@@ -1023,6 +1081,8 @@ fn composed_pieces(areas: &[BlockArea], t: f32, aspect: f32, project: impl Fn(Ve
                 area,
                 polygon,
                 adjusted,
+                group: area.next.as_ref().map_or(usize::from(area.recorder.is_some()), |n| 2 + n.layer),
+                native: area.next.is_some(),
                 phase: if area.active(t) {
                     0
                 } else if area.ready(t) {
@@ -1035,7 +1095,7 @@ fn composed_pieces(areas: &[BlockArea], t: f32, aspect: f32, project: impl Fn(Ve
         .collect();
     let boundaries: Vec<_> = regions
         .iter()
-        .flat_map(|r| std::iter::once(r.polygon).chain((r.phase == 0).then_some(r.adjusted)))
+        .flat_map(|r| std::iter::once(r.polygon).chain((r.phase == 0 && !r.native).then_some(r.adjusted)))
         .collect();
     let mut cells = vec![vec![vec2(0., 0.), vec2(1., 0.), vec2(1., 1.), vec2(0., 1.)]];
     for boundary in &boundaries {
@@ -1070,36 +1130,33 @@ fn composed_pieces(areas: &[BlockArea], t: f32, aspect: f32, project: impl Fn(Ve
             }
         }
         for phase in 0..3 {
-            let mut normal = [false; 2];
-            let mut inverse = [0usize; 2];
-            let mut adjusted_normal = [false; 2];
-            let mut adjusted_inverse = [0usize; 2];
+            // Each Next layer is an independent exactly-one mask. Adapt only
+            // that format rule; drawing remains the existing shared pipeline.
+            let mut groups = std::collections::BTreeMap::<usize, (bool, usize, bool, usize, bool)>::new();
             let mut fade: f32 = 0.;
             for r in regions.iter().filter(|r| r.phase == phase) {
-                let format = usize::from(r.area.recorder.is_some());
                 let inside = inside_convex(center, &r.polygon);
                 let adjusted = inside_convex(center, &r.adjusted);
+                let entry = groups.entry(r.group).or_insert((false, 0, false, 0, r.native));
                 if r.area.is_subtract {
-                    inverse[format] += usize::from(inside);
-                    adjusted_inverse[format] += usize::from(adjusted);
+                    entry.1 += usize::from(inside);
+                    entry.3 += usize::from(adjusted);
                 } else {
-                    normal[format] |= inside;
-                    adjusted_normal[format] |= adjusted;
+                    entry.0 |= inside;
+                    entry.2 |= adjusted;
                 }
                 if inside {
                     fade = fade.max(r.area.fade(t));
                 }
             }
-            let covered = |format: usize| {
-                let flip = if format == 0 { inverse[format] % 2 == 1 } else { inverse[format] == 1 };
-                let adjusted_flip = if format == 0 {
-                    adjusted_inverse[format] % 2 == 1
-                } else {
-                    adjusted_inverse[format] == 1
-                };
-                (normal[format] ^ flip) && (phase != 0 || (adjusted_normal[format] ^ adjusted_flip))
-            };
-            if covered(0) || covered(1) {
+            let covered = groups
+                .iter()
+                .any(|(group, &(normal, inverse, adjusted_normal, adjusted_inverse, native))| {
+                    let flip = if *group == 0 { inverse % 2 == 1 } else { inverse == 1 };
+                    let adjusted_flip = if *group == 0 { adjusted_inverse % 2 == 1 } else { adjusted_inverse == 1 };
+                    (normal ^ flip) && (native || phase != 0 || (adjusted_normal ^ adjusted_flip))
+                });
+            if covered {
                 pieces.push(NoisePiece {
                     polygon,
                     phase,
@@ -1120,6 +1177,7 @@ struct EffectRenderer {
     canvas: Option<NoiseCanvas>,
     overlay_output: Option<RenderTarget>,
     sprite: Program,
+    copy_sprite: Program,
     hover_sprite: Program,
     mask: Program,
     effect: Program,
@@ -1201,6 +1259,7 @@ impl EffectRenderer {
                 )?,
             ],
             sprite: Program::new(VERT, SPRITE, Some(BlendState::new(Equation::Add, BlendFactor::Value(BlendValue::SourceAlpha), BlendFactor::One)))?,
+            copy_sprite: Program::new(VERT, SPRITE, None)?,
             hover_sprite: Program::new(VERT, &SPRITE.replace("texture2D(Texture,uv)*col", "vec4(texture2D(Texture,uv).a) * col"), blend)?,
             mask: Program::new(VERT, PACK_MASK, None)?,
             effect: Program::new(VERT, PACK_EFFECT, None)?,
@@ -1377,7 +1436,7 @@ impl EffectRenderer {
             group.clear();
         }
         let recorder = areas.iter().any(|a| a.recorder.is_some());
-        let pieces = if recorder {
+        let pieces = if recorder || areas.iter().any(|a| a.next.is_some()) && areas.iter().any(|a| a.is_subtract) {
             let (pieces, _) = composed_pieces(areas, t, res.aspect_ratio, |p| Self::screen_uv(p, res, vp, w as f32, h as f32, projection));
             for piece in &pieces {
                 for i in 1..piece.polygon.len() - 1 {
@@ -1786,6 +1845,40 @@ impl Drop for EffectRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn next_masks_match_gameplay_for_inversions_and_separate_layers() {
+        use super::super::next::{NextArea, Tempo};
+        use serde_json::json;
+        let tempo = Tempo::new([(0., 120.)]).unwrap();
+        let make = |invert, layer: usize, x: i32, rotation: i32| {
+            let v = json!({"bottomLeft":{"x":x-200,"y":-150},"topRight":{"x":x+200,"y":150},
+                "appearTime":[0,0,1],"disappearTime":[8,0,1],"activeIntervals":[{"startTime":[0,0,1],"endTime":[8,0,1]}],
+                "layerId":if layer==0 {"a"} else {"b"},"isInvert":invert,
+                "rotateEvents":[{"startTime":[0,0,1],"endTime":[8,0,1],"start":rotation,"end":rotation,"anchor":{"x":0,"y":0}}]});
+            let next = NextArea::parse(v, &tempo, &["a".into(), "b".into()]).unwrap();
+            BlockArea {
+                next: Some(Box::new(next)),
+                is_subtract: invert,
+                ..Default::default()
+            }
+        };
+        for inverses in 0..=4 {
+            for second_layer in [false, true] {
+                let mut areas = vec![make(false, 0, 0, 20), make(false, 0, 100, -30)];
+                areas.extend((0..inverses).map(|i| make(true, usize::from(second_layer), i * 30, -15)));
+                let project = |p: Vec2| p / 10. + Vec2::splat(0.5);
+                let (pieces, _) = composed_pieces(&areas, 1., 1.5, project);
+                for y in -20..=20 {
+                    for x in -30..=30 {
+                        let p = vec2(x as f32 * 0.12 + 0.003, y as f32 * 0.12 + 0.007);
+                        let visible = pieces.iter().any(|piece| inside_convex(project(p), &piece.polygon));
+                        assert_eq!(visible, super::super::blocked(&areas, p, 1., 1.5), "inverses={inverses}, separate={second_layer}, p={p:?}");
+                    }
+                }
+                assert!(composed_pieces(&areas, -1., 1.5, project).0.is_empty());
+            }
+        }
+    }
     fn recorder_area(subtract: bool, line: usize, state: u8, color: Color, pose: super::super::Pose) -> BlockArea {
         use super::super::recorder::{Marker, RecorderArea};
         BlockArea {

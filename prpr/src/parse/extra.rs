@@ -215,6 +215,7 @@ pub async fn parse_extra(source: &str, fs: &mut dyn FileSystem) -> Result<ChartE
         effects,
         global_effects,
         block_areas: Vec::new(),
+        noise_skins: Vec::new(),
         #[cfg(feature = "video")]
         videos,
     })

@@ -115,6 +115,7 @@ pub struct ChartsView {
     pub challenge_selecting: bool,
     pub challenge_selected: Option<ChartItem>,
     pub rks_values: Option<Arc<std::collections::HashMap<String, crate::custom_rks::Resolved>>>,
+    pub rks_hints: Option<Arc<std::collections::HashMap<String, crate::custom_rks::RksGainHint>>>,
     pub rks_action: Option<crate::page::rks::RksAction>,
 }
 
@@ -154,6 +155,7 @@ impl ChartsView {
             challenge_selecting: false,
             challenge_selected: None,
             rks_values: None,
+            rks_hints: None,
             rks_action: None,
         }
     }
@@ -661,6 +663,9 @@ impl ChartsView {
                                             },
                                         );
                                         text.draw();
+                                        if let Some(hint) = self.rks_hints.as_ref().and_then(|hints| chart.local_path.as_ref().and_then(|p| hints.get(p))) {
+                                            crate::rks_hint::render(ui, *hint, r, ar, size * 0.78, c);
+                                        }
                                         if rks.included || self.rks_editing {
                                             let check = Rect::new(r.x + 0.009, r.y + 0.009, 0.05, 0.05);
                                             // Expand the hit square by 30% about its centre; keep the visual size.

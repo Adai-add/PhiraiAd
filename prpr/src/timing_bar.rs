@@ -57,11 +57,12 @@ impl TimingBar {
             (Ok(j), NoteKind::Click) => Some(*j),
             _ => None,
         };
-        if outcome.is_some() || (event.judgement.is_ok() && !matches!(kind, NoteKind::Hold { .. })) {
-            self.last_input_time = Some(real_time);
-        }
         if let Some(judgement) = outcome {
             if event.difference.is_finite() {
+                // Only a plotted timing sample keeps the timing indicator active.
+                // Spatial-only Drag/Flick hits still count, but must not prolong
+                // an older Tap/Hold offset or interrupt its return to centre.
+                self.last_input_time = Some(real_time);
                 let difference = if judgement == Judgement::Miss {
                     event.difference.clamp(-extent, extent)
                 } else {
@@ -405,5 +406,41 @@ mod tests {
         assert!(state.samples.is_empty());
         assert_eq!(state.target(), 0.);
         assert_eq!(state.counts, [0; 5]);
+    }
+
+    #[test]
+    fn spatial_perfects_do_not_restart_indicator_after_idle() {
+        let cfg = TimingBarConfig::default();
+        for kind in [NoteKind::Drag, NoteKind::Flick] {
+            let mut state = TimingBar::default();
+            state.record(&event(Ok(Judgement::Perfect), 0.06), &NoteKind::Click, &cfg, 0.);
+            state.animate(0., &cfg);
+            for n in 1..=12 {
+                state.animate(n as f64 / 10., &cfg);
+            }
+            let before = state.indicator;
+            state.record(&event(Ok(Judgement::Perfect), 0.), &kind, &cfg, 1.21);
+            state.animate(1.3, &cfg);
+            assert!(state.indicator < before, "spatial hit must not pull toward an old offset");
+            assert_eq!(state.last_input_time, Some(0.));
+            assert_eq!(state.samples.len(), 1);
+            assert_eq!(state.counts[0], 2);
+        }
+    }
+
+    #[test]
+    fn spatial_only_run_leaves_timing_indicator_centred() {
+        let cfg = TimingBarConfig::default();
+        let mut state = TimingBar::default();
+        for n in 0..20 {
+            let time = n as f64 / 10.;
+            let kind = if n % 2 == 0 { NoteKind::Drag } else { NoteKind::Flick };
+            state.record(&event(Ok(Judgement::Perfect), 0.), &kind, &cfg, time);
+            state.animate(time, &cfg);
+        }
+        assert_eq!(state.indicator, 0.);
+        assert_eq!(state.last_input_time, None);
+        assert!(state.samples.is_empty());
+        assert_eq!(state.counts[0], 20);
     }
 }

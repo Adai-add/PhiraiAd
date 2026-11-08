@@ -1663,7 +1663,7 @@ mod resource_slider_tests {
         slider.pos = 0.6;
         slider
     }
-    fn touch(phase: TouchPhase, x: f32) -> Touch { Touch { id: 123, phase, position: vec2(x, 0.12) } }
+    fn touch(phase: TouchPhase, x: f32) -> Touch { Touch { id: 123, phase, position: vec2(x, 0.12), time: 0. } }
     #[test]
     fn crossing_threshold_preserves_value_then_moves_relatively() {
         let mut slider = slider(); let mut value = 50.25;

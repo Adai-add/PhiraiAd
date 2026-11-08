@@ -46,6 +46,7 @@ mod popup;
 mod pure_config;
 mod rate;
 mod resource;
+pub mod rks_hint;
 mod scene;
 mod tabs;
 mod tags;

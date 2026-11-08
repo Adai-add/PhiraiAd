@@ -366,6 +366,7 @@ impl LibraryPage {
             list.view.challenge_selecting = self.challenge.active;
             if list.ty == ChartListType::Local {
                 list.view.rks_values = Some(self.rks.resolved.clone());
+                list.view.rks_hints = Some(self.rks.improvement_hints.clone());
                 list.view.rks_editing = self.rks.local_editing();
                 if self.rks.editing {
                     list.view.multi_select = None;

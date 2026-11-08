@@ -1,11 +1,21 @@
 """Prepare runtime resources and unsigned iOS bundle configuration."""
 import plistlib
+import json
+import re
 import shutil
 import sys
 import zipfile
 from pathlib import Path, PurePosixPath
 
 REQUIRED = ("font.ttf", "bold.ttf", "phigros.ttf", "background.jpg", "res/bgm")
+
+
+def release_version():
+    config = json.loads((Path(__file__).resolve().parents[1] / "build_all_new.config.json").read_text(encoding="utf-8-sig"))
+    version = config["version"]
+    if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise ValueError("Invalid iOS release version")
+    return version
 
 
 def check_assets(root):
@@ -68,7 +78,7 @@ def verify_bundle(app):
     with (app / "Info.plist").open("rb") as source:
         config = plistlib.load(source)
     expected = {"CFBundleExecutable": "phira-main", "CFBundleDisplayName": "PhiraiAd",
-                "CFBundleShortVersionString": "1.1.0", "CFBundlePackageType": "APPL"}
+                "CFBundleShortVersionString": release_version(), "CFBundlePackageType": "APPL"}
     for name, value in expected.items():
         if config.get(name) != value:
             raise ValueError(f"Unexpected {name}: {config.get(name)!r}")
@@ -84,6 +94,9 @@ def verify_bundle(app):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["version"]:
+        print(release_version())
+        raise SystemExit(0)
     if len(sys.argv) != 3 or sys.argv[1] not in ("assets", "plist", "verify"):
         raise SystemExit("Usage: prepare_ios_unsigned.py {assets|plist|verify} PATH")
     {"assets": fill_assets, "plist": write_plist, "verify": verify_bundle}[sys.argv[1]](sys.argv[2])

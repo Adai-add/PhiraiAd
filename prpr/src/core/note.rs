@@ -1,4 +1,4 @@
-use super::{chart::ChartSettings, BpmList, CtrlObject, JudgeLine, Matrix, Object, Point, Resource};
+use super::{chart::ChartSettings, BpmList, CtrlObject, JudgeLine, Matrix, Object, Point, Resource, Vector};
 pub use crate::{
     config::Mods,
     judge::{HitSound, JudgeStatus, LIMIT_BAD},
@@ -467,8 +467,46 @@ pub struct BadNote {
 }
 
 impl BadNote {
+    pub fn from_note(note: &Note, line: &JudgeLine, line_transform: Matrix, res: &Resource) -> Self {
+        // Judgement runs before Chart::update, so the height cursor can still
+        // belong to the previous frame (or the other side of a practice seek).
+        let line_height = line.height.value_at(res.time).unwrap_or_default() as f64;
+        let mut ctrl_obj = line.ctrl_obj.borrow_mut();
+        note.init_ctrl_obj(&mut ctrl_obj, line_height);
+        let speed = note.speed * ctrl_obj.y.now_opt().unwrap_or(1.) as f64;
+        let base = ((note.height - line_height) / res.aspect_ratio as f64 * speed) as f32;
+        let incline_sin = line.incline.now_opt().map(|it| it.to_radians().sin()).unwrap_or_default();
+        // Reflect below-line notes locally: pre-multiplication would also
+        // reflect the line's translation and change its world position.
+        let side = Matrix::new_nonuniform_scaling(&Vector::new(1., if note.above { 1. } else { -1. }));
+        Self {
+            time: res.time,
+            kind: note.kind.clone(),
+            matrix: line_transform * side * note.now_transform(res, &ctrl_obj, base, incline_sin),
+        }
+    }
+
+    pub fn is_alive(&self, time: f64) -> bool {
+        time <= self.time + BAD_TIME
+    }
+
+    /// Flush in the same reflected chart space as ordinary notes. Otherwise
+    /// vertices linger until the next chart/noise pass, using that pass's camera.
+    pub fn render_all(notes: &[Self], res: &mut Resource) {
+        if notes.is_empty() {
+            return;
+        }
+        let (flip_x, flip_y) = crate::chart_play::reflection_axes(res.config.flip_x(), false);
+        res.apply_model_of(&Matrix::new_nonuniform_scaling(&Vector::new(flip_x, -flip_y)), |res| {
+            for note in notes {
+                note.render(res);
+            }
+            res.note_buffer.borrow_mut().draw_all();
+        });
+    }
+
     pub fn render(&self, res: &mut Resource) -> bool {
-        if res.time > self.time + BAD_TIME {
+        if !self.is_alive(res.time) {
             return false;
         }
         res.with_model(self.matrix, |res| {

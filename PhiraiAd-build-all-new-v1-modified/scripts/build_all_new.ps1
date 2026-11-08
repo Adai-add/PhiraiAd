@@ -95,8 +95,8 @@ try {
             ndk = '/home/adai_add/Android/Sdk/ndk/27.3.13750724'
             buildTools = '/home/adai_add/Android/Sdk/build-tools/35.0.0'
             vcpkgRoot = 'E:\PhiraiAd-vcpkg'
-            version = '1.1.0'
-            minimumVersionCode = 11000
+            version = '1.6.0'
+            minimumVersionCode = 16000
             proxy = 'http://127.0.0.1:51081'
         }
         [IO.File]::WriteAllText($ConfigPath, ($Defaults | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
@@ -106,7 +106,7 @@ try {
         'vcpkgRoot', 'version', 'minimumVersionCode', 'proxy')) {
         if (-not ($Config.PSObject.Properties.Name -contains $Name)) { throw "Config missing $Name." }
     }
-    if ($Config.version -ne '1.1.0') { throw 'This release script expects version 1.1.0.' }
+    if ($Config.version -notmatch '^\d+\.\d+\.\d+(?:[-.][A-Za-z0-9.-]+)?$') { throw 'Invalid release version in build configuration.' }
     New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
     $LogRoot = Join-Path $OutputRoot ('build-logs\' + $RunId)
     New-Item -ItemType Directory -Path $LogRoot -Force | Out-Null
@@ -157,8 +157,8 @@ try {
     Build-Platform 'windows-x64' {
         $Builder = Join-Path $WindowsRoot 'scripts\build_windows_release.ps1'
         Invoke-Checked 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-            $Builder, '-Architecture', 'x64', '-VcpkgRoot', [string]$Config.vcpkgRoot, '-Version', '1.1.0')
-        $Built = Join-Path $WindowsRoot 'dist\PhiraiAd-v1.1.0-windows-x64.zip'
+            $Builder, '-Architecture', 'x64', '-VcpkgRoot', [string]$Config.vcpkgRoot, '-Version', [string]$Config.version)
+        $Built = Join-Path $WindowsRoot ("dist\PhiraiAd-v$($Config.version)-windows-x64.zip")
         if (-not (Test-Path -LiteralPath $Built)) { throw 'Windows ZIP missing.' }
         $TemporaryOutput = Join-Path $OutputRoot ('.windows-' + $RunId + '.zip')
         try {

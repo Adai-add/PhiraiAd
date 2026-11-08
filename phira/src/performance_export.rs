@@ -10,7 +10,7 @@ pub fn start(name: &str) -> bool {
     let (tx, rx) = mpsc::channel();
     if
         !performance::start(
-            serde_json::json!({"chart_name":name,"app_version":"v1.3.0","git_revision":env!("GIT_HASH"),"base_revision":"bcdecf3","profiler_revision":"performance-r1","os":std::env::consts::OS,"arch":std::env::consts::ARCH}),
+            serde_json::json!({"chart_name":name,"app_version":concat!("v", env!("CARGO_PKG_VERSION")),"git_revision":env!("GIT_HASH"),"base_revision":"bcdecf3","profiler_revision":"performance-r1","os":std::env::consts::OS,"arch":std::env::consts::ARCH}),
             Box::new(move |report| {
                 std::thread::spawn(move || {
                     let _ = tx.send(export(&report));

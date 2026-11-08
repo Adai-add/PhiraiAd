@@ -31,6 +31,7 @@ enum Tab {
 pub struct RksPanel {
     pub editing: bool,
     pub resolved: Arc<HashMap<String, Resolved>>,
+    pub improvement_hints: Arc<HashMap<String, RksGainHint>>,
     settings: Settings,
     path: PathBuf,
     locals: Vec<LocalInput>,
@@ -54,6 +55,7 @@ impl RksPanel {
         Ok(Self {
             editing: false,
             resolved: Arc::default(),
+            improvement_hints: Arc::default(),
             settings,
             path,
             locals: Vec::new(),
@@ -138,6 +140,7 @@ impl RksPanel {
     }
     fn recalculate(&mut self) {
         let (resolved, summary) = calculate(&self.settings, &self.locals);
+        self.improvement_hints = Arc::new(improvement_hints(&self.settings, &self.locals, &resolved));
         self.resolved = Arc::new(resolved);
         self.summary = summary;
     }

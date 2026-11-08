@@ -379,7 +379,7 @@ impl Fader {
                     + 0.012;
             }
             if s == "PhiraiAd" {
-                ui.text("v1.5.2")
+                ui.text(concat!("v", env!("CARGO_PKG_VERSION")))
                     .pos(x + 0.01, tp + h - 0.027)
                     .anchor(0., 1.)
                     .color(semi_white(0.4))

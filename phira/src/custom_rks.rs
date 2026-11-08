@@ -313,6 +313,79 @@ pub fn ranked_entries(settings: &Settings, locals: &[LocalInput]) -> Vec<RankedE
     entries
 }
 
+/// A library hint uses the same effective inputs and deterministic membership as
+/// the actual Bn/AP board. TargetAccuracy stores absolute accuracy in hundredths
+/// of a percent, independent of the chart's current accuracy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RksGainHint {
+    Phi,
+    NoGain,
+    Ready,
+    TargetAccuracy(u32),
+    Pending,
+}
+impl RksGainHint {
+    pub fn text(self) -> String {
+        match self {
+            Self::Phi => "φ".into(),
+            Self::NoGain => "√".into(),
+            Self::Ready => "↑".into(),
+            Self::TargetAccuracy(cents) => format!("↑{}.{:02}%", cents / 100, cents % 100),
+            Self::Pending => "—".into(),
+        }
+    }
+}
+
+pub fn improvement_hints(settings: &Settings, locals: &[LocalInput], resolved: &HashMap<String, Resolved>) -> HashMap<String, RksGainHint> {
+    let board = ranked_entries(settings, locals);
+    let best: Vec<_> = board.iter().filter(|e| !e.ap_group).collect();
+    let ap: Vec<_> = board.iter().filter(|e| e.ap_group).collect();
+    let members: std::collections::HashSet<_> = best.iter().filter_map(|e| e.path.as_deref()).collect();
+    let best_full = best.len() >= settings.best_count;
+    let best_cutoff = best.last().map_or(0., |e| e.rks);
+    let ap_cutoff = if ap.len() < settings.ap_count {
+        0.
+    } else {
+        ap.last().map_or(0., |e| e.rks)
+    };
+    resolved
+        .iter()
+        .map(|(path, value)| {
+            let accuracy = value.accuracy.filter(|a| a.is_finite() && *a >= 0.).unwrap_or(0.);
+            let hint = if accuracy >= 100. {
+                RksGainHint::Phi
+            } else if !value.included {
+                RksGainHint::NoGain
+            } else if let Some(difficulty) = value.difficulty.filter(|d| d.is_finite() && *d >= 0.) {
+                let best_can_gain = settings.best_count > 0 && difficulty > if best_full { best_cutoff } else { 0. };
+                let ap_can_gain = settings.ap_count > 0 && difficulty > ap_cutoff;
+                if !best_can_gain && !ap_can_gain {
+                    RksGainHint::NoGain
+                } else if members.contains(path.as_str()) || settings.best_count > 0 && !best_full {
+                    RksGainHint::Ready
+                } else if best_can_gain {
+                    // The formula is zero below 70%; include that discontinuity.
+                    let target = (55. + 45. * (best_cutoff / difficulty).sqrt()).max(70.);
+                    let mut cents = (target * 100.).floor() as u32;
+                    // Verify the displayed absolute accuracy, including strict ties
+                    // and floating point boundaries. best_can_gain guarantees
+                    // that the search terminates at or below 100.00%.
+                    while single_rks(difficulty, cents as f64 / 100.) <= best_cutoff {
+                        cents += 1;
+                    }
+                    RksGainHint::TargetAccuracy(cents)
+                } else {
+                    // With Bn disabled (or unreachable), only becoming AP can help.
+                    RksGainHint::TargetAccuracy(10000)
+                }
+            } else {
+                RksGainHint::Pending
+            };
+            (path.clone(), hint)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod board_tests {
     use super::*;
@@ -412,4 +485,204 @@ pub fn highest_record_accuracy(ordinary_or_cloud: Option<f64>, personal_local: O
         .chain(personal_local)
         .filter_map(accuracy_value)
         .max_by(f64::total_cmp)
+}
+
+#[cfg(test)]
+mod gain_tests {
+    use super::*;
+    fn input(path: &str, difficulty: f64, accuracy: Option<f64>) -> LocalInput {
+        LocalInput {
+            path: path.into(),
+            name: path.into(),
+            level: "IN".into(),
+            difficulty,
+            accuracy,
+            ai_difficulty: None,
+        }
+    }
+    fn hints(s: &Settings, locals: &[LocalInput]) -> HashMap<String, RksGainHint> {
+        improvement_hints(s, locals, &calculate(s, locals).0)
+    }
+    #[test]
+    fn priority_phi_no_gain_and_membership() {
+        let s = Settings {
+            best_count: 2,
+            ap_count: 1,
+            ..Default::default()
+        };
+        let locals = [input("ap", 20., Some(100.)), input("best", 16., Some(99.)), input("weak", 10., Some(80.))];
+        let h = hints(&s, &locals);
+        assert_eq!(h["ap"], RksGainHint::Phi);
+        assert_eq!(h["best"], RksGainHint::Ready);
+        assert_eq!(h["weak"], RksGainHint::NoGain);
+        assert_eq!(RksGainHint::Phi.text(), "φ");
+        assert_eq!(RksGainHint::NoGain.text(), "√");
+        assert_eq!(RksGainHint::Ready.text(), "↑");
+        assert_eq!(RksGainHint::TargetAccuracy(9901).text(), "↑99.01%");
+        assert_eq!(RksGainHint::TargetAccuracy(10000).text(), "↑100.00%");
+        let mut resolved = calculate(&s, &locals).0;
+        resolved.get_mut("ap").unwrap().accuracy = Some(100.01);
+        assert_eq!(improvement_hints(&s, &locals, &resolved)["ap"], RksGainHint::Phi);
+    }
+    #[test]
+    fn tie_outside_bn_requires_a_strict_gain_and_stable_membership() {
+        let s = Settings {
+            best_count: 1,
+            ap_count: 0,
+            ..Default::default()
+        };
+        let locals = [input("a", 16., Some(99.)), input("b", 16., Some(99.))];
+        let h = hints(&s, &locals);
+        assert_eq!(h["a"], RksGainHint::Ready);
+        assert_eq!(h["b"], RksGainHint::TargetAccuracy(9901));
+        assert_eq!(h, hints(&s, &[locals[1].clone(), locals[0].clone()]));
+    }
+    #[test]
+    fn unfilled_bn_includes_unplayed_charts_and_zero_bn_uses_ap_slots() {
+        let mut s = Settings {
+            best_count: 4,
+            ap_count: 0,
+            ..Default::default()
+        };
+        let locals = [input("record", 15., Some(99.)), input("unplayed", 16., None)];
+        assert!(hints(&s, &locals).values().all(|h| *h == RksGainHint::Ready));
+        s.best_count = 0;
+        s.ap_count = 1;
+        assert_eq!(hints(&s, &locals)["record"], RksGainHint::TargetAccuracy(10000));
+        assert_eq!(hints(&s, &locals)["unplayed"], RksGainHint::TargetAccuracy(10000));
+        let locals = [
+            input("ap", 20., Some(100.)),
+            input("weak", 19., Some(99.)),
+            input("next", 21., Some(99.99)),
+        ];
+        let h = hints(&s, &locals);
+        assert_eq!(h["weak"], RksGainHint::NoGain);
+        assert_eq!(h["next"], RksGainHint::TargetAccuracy(10000));
+        s.ap_count = 0;
+        assert_eq!(hints(&s, &locals)["next"], RksGainHint::NoGain);
+    }
+    #[test]
+    fn cap_ties_can_still_gain_through_an_unfilled_ap_group() {
+        let mut s = Settings {
+            best_count: 1,
+            ap_count: 1,
+            ..Default::default()
+        };
+        let locals = [input("ap", 15., Some(100.)), input("next", 15., Some(99.))];
+        assert_eq!(hints(&s, &locals)["next"], RksGainHint::NoGain);
+        s.ap_count = 2;
+        assert_eq!(hints(&s, &locals)["next"], RksGainHint::TargetAccuracy(10000));
+        s.best_count = 0;
+        let near = [input("near", 16., Some(99.999999))];
+        assert_eq!(hints(&s, &near)["near"], RksGainHint::TargetAccuracy(10000));
+    }
+    #[test]
+    fn zero_cutoff_respects_seventy_percent_discontinuity() {
+        let s = Settings {
+            best_count: 1,
+            ap_count: 0,
+            ..Default::default()
+        };
+        let locals = [input("a-cut", 0., Some(100.)), input("z-next", 9., Some(65.))];
+        assert_eq!(hints(&s, &locals)["z-next"], RksGainHint::TargetAccuracy(7000));
+    }
+    #[test]
+    fn overrides_extras_exclusions_and_pending_ai_follow_actual_rks_inputs() {
+        let mut s = Settings {
+            best_count: 1,
+            ap_count: 0,
+            ..Default::default()
+        };
+        s.extras.push(ExtraEntry {
+            id: 1,
+            name: "extra".into(),
+            difficulty: 17.,
+            accuracy: 100.,
+            included: true,
+        });
+        let locals = [input("local", 16., Some(99.)), input("ai", 20., Some(99.))];
+        s.charts.insert(
+            "ai".into(),
+            ChartSettings {
+                difficulty_source: DifficultySource::Ai,
+                ..Default::default()
+            },
+        );
+        assert_eq!(hints(&s, &locals)["ai"], RksGainHint::Pending);
+        assert_eq!(hints(&s, &locals)["local"], RksGainHint::NoGain);
+        s.charts.insert(
+            "local".into(),
+            ChartSettings {
+                difficulty_source: DifficultySource::Custom,
+                custom_difficulty: Some(18.),
+                accuracy_source: AccuracySource::Custom,
+                custom_accuracy: Some(99.9),
+                ..Default::default()
+            },
+        );
+        assert_eq!(hints(&s, &locals)["local"], RksGainHint::Ready);
+        s.charts.get_mut("local").unwrap().included = false;
+        assert_eq!(hints(&s, &locals)["local"], RksGainHint::NoGain);
+    }
+    #[test]
+    fn displayed_absolute_targets_really_improve_the_calculator_and_are_minimal() {
+        let s = Settings {
+            best_count: 1,
+            ap_count: 0,
+            ..Default::default()
+        };
+        let mut checked = 0;
+        for cutoff_d in [1., 10., 16., 20.] {
+            for cutoff_acc in [0., 70., 90., 99.99, 100.] {
+                for d in [0., 5., 15., 17., 21., 25.] {
+                    for acc in [0., 65., 69.99, 70., 90., 98.1234, 99., 99.009, 99.999999] {
+                        let mut locals = [input("a-cut", cutoff_d, Some(cutoff_acc)), input("z-next", d, Some(acc))];
+                        let before = calculate(&s, &locals).1.rks;
+                        match hints(&s, &locals)["z-next"] {
+                            RksGainHint::TargetAccuracy(cents) => {
+                                let target = cents as f64 / 100.;
+                                assert!(target > acc && target <= 100.);
+                                locals[1].accuracy = Some(target);
+                                assert!(calculate(&s, &locals).1.rks > before, "d={d}, acc={acc}, cents={cents}");
+                                locals[1].accuracy = Some((cents - 1) as f64 / 100.);
+                                assert!(calculate(&s, &locals).1.rks <= before, "target was overstated");
+                                checked += 1;
+                            }
+                            RksGainHint::NoGain => {
+                                locals[1].accuracy = Some(100.);
+                                assert_eq!(calculate(&s, &locals).1.rks, before);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 100);
+    }
+
+    #[test]
+    fn absolute_target_is_independent_of_current_accuracy_and_rounds_strictly_up() {
+        let s = Settings {
+            best_count: 1,
+            ap_count: 0,
+            ..Default::default()
+        };
+        for (cutoff, expected) in [
+            (70., 7001),
+            (98.12, 9813),
+            (99., 9901),
+            (99.009, 9901),
+            (99.99, 10000),
+            (99.999999, 10000),
+        ] {
+            for accuracy in [0., 65., 80., 98.123456] {
+                if accuracy > cutoff {
+                    continue;
+                }
+                let locals = [input("a-cut", 16., Some(cutoff)), input("z-next", 16., Some(accuracy))];
+                assert_eq!(hints(&s, &locals)["z-next"], RksGainHint::TargetAccuracy(expected));
+            }
+        }
+    }
 }
