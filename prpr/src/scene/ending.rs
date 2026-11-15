@@ -582,6 +582,30 @@ impl Scene for EndingScene {
             };
             ui.text(text).pos(r.right() + 0.03, y).size(s).draw_using(&BOLD_FONT);
 
+            y += dy;
+            x -= dy / 1.9 * 0.4;
+            let r = ui
+                .text("EARLY")
+                .pos(x + 0.03, y)
+                .color(semi_white(0.6))
+                .size(s)
+                .draw_using(&BOLD_FONT);
+            let r = ui
+                .text(res.early.to_string())
+                .pos(r.right() + 0.02, y)
+                .size(s)
+                .draw_using(&BOLD_FONT);
+            let r = ui
+                .text("LATE")
+                .pos(r.right() + 0.06, y)
+                .color(semi_white(0.6))
+                .size(s)
+                .draw_using(&BOLD_FONT);
+            ui.text(res.late.to_string())
+                .pos(r.right() + 0.02, y)
+                .size(s)
+                .draw_using(&BOLD_FONT);
+
             let mut r = proceed_rect(ui.top);
             self.btn_proceed.render_shadow(ui, r, t, |ui, path| {
                 ui.fill_path(&path, Color::from_hex_rgb(0x3f51b5));
